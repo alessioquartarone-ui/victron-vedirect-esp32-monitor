@@ -6,9 +6,67 @@ This project is based on a stable private ESP32 CYD firmware branch, cleaned and
 
 ---
 
-## First public firmware target
+## Recommended board
 
-The first official public target is:
+Recommended main board:
+
+ESP32-S3 N16R8 Headless
+
+Suggested specs:
+
+- ESP32-S3
+- 16 MB Flash
+- 8 MB PSRAM
+- USB-C
+- WebUI only, no display required
+
+Why this is recommended:
+
+- Best price/performance
+- More memory than classic ESP32
+- Better for WebUI, OTA, JSON, history and future features
+- No display/touch clone compatibility problems
+- Any phone, tablet or PC can be used as the display through the WebUI
+
+Recommended wiring for ESP32-S3 Headless:
+
+Victron VE.Direct TX  -> ESP32-S3 GPIO18  
+Victron VE.Direct GND -> ESP32-S3 GND  
+Victron VE.Direct RX  -> not connected  
+Victron VE.Direct 5V  -> not connected  
+
+Default ESP32-S3 Headless runtime pins:
+
+VE.Direct RX GPIO: 18  
+ESP battery ADC GPIO: 4  
+ESP battery ADC can be disabled from the setup wizard by setting it to -1.
+
+---
+
+## Supported public firmware targets
+
+Current public targets:
+
+- ESP32S3-HEADLESS
+- ESP32-HEADLESS
+- ESP32-CYD-ILI9341
+
+Target descriptions:
+
+ESP32S3-HEADLESS  
+Recommended target. Generic ESP32-S3 board, WebUI only, no display required.
+
+ESP32-HEADLESS  
+Generic classic ESP32 board, WebUI only, no display required.
+
+ESP32-CYD-ILI9341  
+ESP32 Cheap Yellow Display / CYD with 2.8" ILI9341 display and XPT2046 touch.
+
+---
+
+## Display board option
+
+Best all-in-one display board:
 
 ESP32-CYD-ILI9341
 
@@ -20,7 +78,7 @@ Touch: XPT2046
 VE.Direct RX default: GPIO27  
 ESP battery ADC default: GPIO34  
 
-Default wiring:
+Default CYD wiring:
 
 Victron VE.Direct TX  -> ESP32 GPIO27  
 Victron VE.Direct GND -> ESP32 GND  
@@ -45,6 +103,8 @@ Do not power the ESP32/CYD directly from the VE.Direct 5V pin unless your hardwa
 - JSON API
 - Pretty JSON output
 - Runtime configuration stored in Preferences/NVS
+- Multiple public firmware targets
+- OTA firmware repository separated from source repository
 
 ---
 
@@ -75,6 +135,8 @@ The wizard can configure:
 
 Display, touch and SPI pins are compile-time hardware target settings and are not changed from the wizard.
 
+To use another display or touch controller, flash the matching firmware target or build a custom target.
+
 ---
 
 ## Default setup AP
@@ -94,13 +156,35 @@ OTA firmware binaries are stored in a separate public repository:
 
 victron-vedirect-esp32-monitor-ota
 
-Default OTA files for the CYD target:
+Current OTA targets:
 
-firmware/esp32-cyd-ili9341/version.txt  
-firmware/esp32-cyd-ili9341/latest.bin  
-firmware/esp32-cyd-ili9341/latest.sha256  
+firmware/esp32s3-headless/  
+firmware/esp32-headless/  
+firmware/esp32-cyd-ili9341/  
 
-Default raw URLs:
+Each target contains:
+
+version.txt  
+latest.bin  
+latest.sha256  
+
+Default raw URLs for ESP32-S3 Headless:
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/version.txt
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/latest.bin
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/latest.sha256
+
+Default raw URLs for ESP32 Headless:
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/version.txt
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/latest.bin
+
+https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/latest.sha256
+
+Default raw URLs for ESP32 CYD ILI9341:
 
 https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/version.txt
 
@@ -108,19 +192,22 @@ https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-mo
 
 https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.sha256
 
-Users can change these URLs from the setup wizard.
+Users can change OTA URLs from the setup wizard.
 
 ---
 
-## Planned hardware targets
+## Firmware versions
 
-- ESP32-CYD-ILI9341
-- ESP32-HEADLESS
-- ESP32S3-HEADLESS
-- ESP32S3-ILI9341
-- ESP32S3-ST7796
+Current public versions:
 
-The headless targets are planned for users who want to use the monitor only from the WebUI without a TFT display.
+ESP32S3-HEADLESS  
+V10.5.1-ESP32S3-HEADLESS-PUBLIC-WIZARD
+
+ESP32-HEADLESS  
+V10.5.1-ESP32-HEADLESS-PUBLIC-WIZARD
+
+ESP32-CYD-ILI9341  
+V10.5.1-CYD-PUBLIC-WIZARD
 
 ---
 
@@ -136,6 +223,22 @@ Victron_Display_Web/config_user.h
 
 config_user.h is ignored by Git and must not be committed.
 
+Runtime configuration is saved on the ESP32 using Preferences/NVS and can be changed from the setup wizard.
+
+---
+
+## Planned future targets
+
+Planned display targets:
+
+- ESP32S3-ILI9341
+- ESP32S3-ST7796
+
+Possible future experimental targets:
+
+- ESP32-C6-HEADLESS
+- LilyGO T-Display S3
+
 ---
 
 ## Safety notes
@@ -145,9 +248,13 @@ config_user.h is ignored by Git and must not be committed.
 - Use a proper buck converter to power the ESP32 from a 12V/24V system.
 - Check GPIO compatibility before changing runtime pins.
 - Display/touch/SPI pins require a matching firmware target.
+- VE.Direct TX goes to ESP32 RX GPIO.
+- VE.Direct GND must be connected to ESP32 GND.
+- VE.Direct RX is normally not needed.
+- VE.Direct 5V should normally remain disconnected.
 
 ---
 
 ## License
 
-License to be defined.
+MIT License
