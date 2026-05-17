@@ -5760,7 +5760,7 @@ void handleBatteryJson() {
   float pct = espBatteryPercent();
   String j = "{";
   j += "\"firmware\":\"" + String(FW_VERSION) + "\",";
-  j += "\"source_gpio\":" + String(pubCfg.espBatteryAdcPin) + ",";";
+  j += "\"source_gpio\":" + String(pubCfg.espBatteryAdcPin) + ",";
   j += "\"multiplier\":" + String(espBatteryMultiplier(), 4) + ",";
   j += "\"adc_pin_voltage\":" + String(pubCfg.espBatteryAdcPin < 0 ? 0 : adcPinVoltage(pubCfg.espBatteryAdcPin), 3) + ",";
   j += "\"lipo_voltage\":" + String(isnan(v) ? 0 : v, 3) + ",";
