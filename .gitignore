@@ -1,14 +1,51 @@
+# ======================================================
+# Victron VE.Direct ESP32 Monitor - Public repo ignore
+# ======================================================
+
+# Private compile-time user config
 Victron_Display_Web/config_user.h
 Victron_Display_Web/secrets.h
 
+# Firmware build outputs
 *.bin
 *.elf
 *.map
 *.hex
+*.uf2
+*.partitions.bin
+*.bootloader.bin
 
-.DS_Store
+# Arduino / build folders
+build/
+dist/
+.cache/
+arduino-build-*/
+arduino-cache-*/
+
+# PlatformIO, if used by contributors
+.pio/
+platformio.ini.bak
+
+# IDE folders
 .vscode/
 .idea/
 
-build/
-dist/
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+
+# Local exported configs/backups
+backup/
+backups/
+exports/
+logs/
+
+# Do not commit local generated firmware artifacts
+firmware/latest.bin
+firmware/version.txt
+firmware/latest.sha256
