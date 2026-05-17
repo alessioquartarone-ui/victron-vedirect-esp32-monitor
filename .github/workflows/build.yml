@@ -23,7 +23,7 @@ jobs:
 
       - name: Configure Arduino CLI
         run: |
-          arduino-cli config init
+          arduino-cli config init --overwrite
           arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           arduino-cli core update-index
 
@@ -40,8 +40,15 @@ jobs:
 
       - name: Force TFT_eSPI setup for ESP32 CYD ILI9341
         run: |
-          TFT_SETUP="$(arduino-cli config dump | grep "user:" | head -n1 | sed 's/^.*user: //')/libraries/TFT_eSPI/User_Setup.h"
+          TFT_SETUP="/home/runner/Arduino/libraries/TFT_eSPI/User_Setup.h"
+
           echo "TFT setup path: $TFT_SETUP"
+
+          if [ ! -d "/home/runner/Arduino/libraries/TFT_eSPI" ]; then
+            echo "TFT_eSPI library folder not found"
+            ls -la /home/runner/Arduino/libraries || true
+            exit 1
+          fi
 
           cat > "$TFT_SETUP" <<'EOF'
           #pragma once
@@ -76,6 +83,9 @@ jobs:
           #define SPI_READ_FREQUENCY   5000000
           #define SPI_TOUCH_FREQUENCY  2500000
           EOF
+
+          echo "Generated TFT_eSPI User_Setup.h:"
+          cat "$TFT_SETUP"
 
       - name: Compile firmware
         run: |
