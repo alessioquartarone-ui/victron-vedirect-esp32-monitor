@@ -1,1 +1,14 @@
+Victron_Display_Web/config_user.h
+Victron_Display_Web/secrets.h
 
+*.bin
+*.elf
+*.map
+*.hex
+
+.DS_Store
+.vscode/
+.idea/
+
+build/
+dist/
