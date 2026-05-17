@@ -1,5 +1,22 @@
-  build-esp32s3-headless:
-    name: Build ESP32-S3 Headless WebUI
+name: Build ESP32 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "Victron_Display_Web/**"
+      - ".github/workflows/build.yml"
+
+env:
+  VERSION_CYD: "V10.5.1-CYD-PUBLIC-WIZARD"
+  VERSION_ESP32_HEADLESS: "V10.5.1-ESP32-HEADLESS-PUBLIC-WIZARD"
+  VERSION_ESP32S3_HEADLESS: "V10.5.1-ESP32S3-HEADLESS-PUBLIC-WIZARD"
+
+jobs:
+  build-all-targets:
+    name: Build all public firmware targets
     runs-on: ubuntu-latest
 
     steps:
@@ -26,9 +43,11 @@
           arduino-cli lib install "WiFiManager@2.0.17"
           arduino-cli lib install "XPT2046_Touchscreen@1.4"
 
-      - name: Force safe TFT_eSPI setup for ESP32-S3 headless compile
+      - name: Force TFT_eSPI setup for ESP32 CYD ILI9341
         run: |
           TFT_SETUP="/home/runner/Arduino/libraries/TFT_eSPI/User_Setup.h"
+
+          echo "TFT setup path: $TFT_SETUP"
 
           if [ ! -d "/home/runner/Arduino/libraries/TFT_eSPI" ]; then
             echo "TFT_eSPI library folder not found"
@@ -70,7 +89,64 @@
           #define SPI_TOUCH_FREQUENCY  2500000
           EOF
 
-      - name: Compile ESP32-S3 headless firmware
+          echo "Generated TFT_eSPI User_Setup.h:"
+          cat "$TFT_SETUP"
+
+      - name: Build ESP32 CYD ILI9341
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashMode=qio,FlashFreq=80,CPUFreq=240,UploadSpeed=115200,DebugLevel=none,PSRAM=disabled" \
+            --build-property compiler.cpp.extra_flags="-fpermissive -DVIC_TARGET_CYD_ILI9341" \
+            --output-dir build/esp32-cyd-ili9341 \
+            Victron_Display_Web
+
+      - name: Prepare ESP32 CYD ILI9341 artifact
+        run: |
+          mkdir -p firmware/esp32-cyd-ili9341
+
+          BIN_FILE="$(find build/esp32-cyd-ili9341 -name '*.bin' | grep -v bootloader | grep -v partitions | head -n1)"
+
+          if [ -z "$BIN_FILE" ]; then
+            echo "ESP32 CYD ILI9341 firmware .bin not found"
+            find build/esp32-cyd-ili9341 -type f
+            exit 1
+          fi
+
+          cp "$BIN_FILE" firmware/esp32-cyd-ili9341/latest.bin
+          echo "$VERSION_CYD" > firmware/esp32-cyd-ili9341/version.txt
+          sha256sum firmware/esp32-cyd-ili9341/latest.bin | awk '{print $1}' > firmware/esp32-cyd-ili9341/latest.sha256
+
+          echo "ESP32 CYD ILI9341 artifact:"
+          ls -lh firmware/esp32-cyd-ili9341
+
+      - name: Build ESP32 Headless WebUI
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashMode=qio,FlashFreq=80,CPUFreq=240,UploadSpeed=115200,DebugLevel=none,PSRAM=disabled" \
+            --build-property compiler.cpp.extra_flags="-fpermissive -DVIC_TARGET_ESP32_HEADLESS" \
+            --output-dir build/esp32-headless \
+            Victron_Display_Web
+
+      - name: Prepare ESP32 Headless artifact
+        run: |
+          mkdir -p firmware/esp32-headless
+
+          BIN_FILE="$(find build/esp32-headless -name '*.bin' | grep -v bootloader | grep -v partitions | head -n1)"
+
+          if [ -z "$BIN_FILE" ]; then
+            echo "ESP32 Headless firmware .bin not found"
+            find build/esp32-headless -type f
+            exit 1
+          fi
+
+          cp "$BIN_FILE" firmware/esp32-headless/latest.bin
+          echo "$VERSION_ESP32_HEADLESS" > firmware/esp32-headless/version.txt
+          sha256sum firmware/esp32-headless/latest.bin | awk '{print $1}' > firmware/esp32-headless/latest.sha256
+
+          echo "ESP32 Headless artifact:"
+          ls -lh firmware/esp32-headless
+
+      - name: Build ESP32-S3 Headless WebUI
         run: |
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32s3:PartitionScheme=min_spiffs,FlashMode=qio,CPUFreq=240,UploadSpeed=921600,DebugLevel=none,PSRAM=disabled" \
@@ -78,31 +154,44 @@
             --output-dir build/esp32s3-headless \
             Victron_Display_Web
 
-      - name: Prepare ESP32-S3 headless firmware artifacts
+      - name: Prepare ESP32-S3 Headless artifact
         run: |
           mkdir -p firmware/esp32s3-headless
 
           BIN_FILE="$(find build/esp32s3-headless -name '*.bin' | grep -v bootloader | grep -v partitions | head -n1)"
 
           if [ -z "$BIN_FILE" ]; then
-            echo "Firmware .bin not found"
+            echo "ESP32-S3 Headless firmware .bin not found"
             find build/esp32s3-headless -type f
             exit 1
           fi
 
           cp "$BIN_FILE" firmware/esp32s3-headless/latest.bin
-          echo "V10.5.1-ESP32S3-HEADLESS-PUBLIC-WIZARD" > firmware/esp32s3-headless/version.txt
+          echo "$VERSION_ESP32S3_HEADLESS" > firmware/esp32s3-headless/version.txt
           sha256sum firmware/esp32s3-headless/latest.bin | awk '{print $1}' > firmware/esp32s3-headless/latest.sha256
 
+          echo "ESP32-S3 Headless artifact:"
           ls -lh firmware/esp32s3-headless
 
-      - name: Upload ESP32-S3 headless artifact
+      - name: Upload ESP32 CYD ILI9341 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-cyd-ili9341-firmware
+          path: firmware/esp32-cyd-ili9341
+
+      - name: Upload ESP32 Headless artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-headless-firmware
+          path: firmware/esp32-headless
+
+      - name: Upload ESP32-S3 Headless artifact
         uses: actions/upload-artifact@v4
         with:
           name: esp32s3-headless-firmware
           path: firmware/esp32s3-headless
 
-      - name: Publish ESP32-S3 headless OTA firmware
+      - name: Publish OTA firmware
         if: github.event_name == 'workflow_dispatch'
         env:
           OTA_REPO_TOKEN: ${{ secrets.OTA_REPO_TOKEN }}
@@ -117,19 +206,40 @@
 
           git clone https://x-access-token:${OTA_REPO_TOKEN}@github.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota.git ota-repo
 
+          mkdir -p ota-repo/firmware/esp32-cyd-ili9341
+          mkdir -p ota-repo/firmware/esp32-headless
           mkdir -p ota-repo/firmware/esp32s3-headless
+
+          cp firmware/esp32-cyd-ili9341/latest.bin ota-repo/firmware/esp32-cyd-ili9341/latest.bin
+          cp firmware/esp32-cyd-ili9341/version.txt ota-repo/firmware/esp32-cyd-ili9341/version.txt
+          cp firmware/esp32-cyd-ili9341/latest.sha256 ota-repo/firmware/esp32-cyd-ili9341/latest.sha256
+
+          cp firmware/esp32-headless/latest.bin ota-repo/firmware/esp32-headless/latest.bin
+          cp firmware/esp32-headless/version.txt ota-repo/firmware/esp32-headless/version.txt
+          cp firmware/esp32-headless/latest.sha256 ota-repo/firmware/esp32-headless/latest.sha256
 
           cp firmware/esp32s3-headless/latest.bin ota-repo/firmware/esp32s3-headless/latest.bin
           cp firmware/esp32s3-headless/version.txt ota-repo/firmware/esp32s3-headless/version.txt
           cp firmware/esp32s3-headless/latest.sha256 ota-repo/firmware/esp32s3-headless/latest.sha256
 
           cd ota-repo
-          git add firmware/esp32s3-headless/latest.bin firmware/esp32s3-headless/version.txt firmware/esp32s3-headless/latest.sha256
+
+          git add firmware/esp32-cyd-ili9341/latest.bin
+          git add firmware/esp32-cyd-ili9341/version.txt
+          git add firmware/esp32-cyd-ili9341/latest.sha256
+
+          git add firmware/esp32-headless/latest.bin
+          git add firmware/esp32-headless/version.txt
+          git add firmware/esp32-headless/latest.sha256
+
+          git add firmware/esp32s3-headless/latest.bin
+          git add firmware/esp32s3-headless/version.txt
+          git add firmware/esp32s3-headless/latest.sha256
 
           if git diff --cached --quiet; then
-            echo "No ESP32-S3 headless OTA changes to publish."
+            echo "No OTA changes to publish."
             exit 0
           fi
 
-          git commit -m "Publish ESP32-S3 headless firmware V10.5.1"
+          git commit -m "Publish public firmware targets"
           git push
