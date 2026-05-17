@@ -84,10 +84,9 @@ jobs:
           #define SPI_TOUCH_FREQUENCY  2500000
           EOF
 
-          echo "Generated TFT_eSPI User_Setup.h:"
           cat "$TFT_SETUP"
 
-      - name: Compile firmware
+      - name: Compile CYD firmware
         run: |
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashMode=qio,FlashFreq=80,CPUFreq=240,UploadSpeed=115200,DebugLevel=none,PSRAM=disabled" \
@@ -95,7 +94,7 @@ jobs:
             --output-dir build/esp32-cyd-ili9341 \
             Victron_Display_Web
 
-      - name: Prepare firmware artifacts
+      - name: Prepare CYD firmware artifacts
         run: |
           mkdir -p firmware/esp32-cyd-ili9341
 
@@ -108,21 +107,18 @@ jobs:
           fi
 
           cp "$BIN_FILE" firmware/esp32-cyd-ili9341/latest.bin
-
           echo "V10.5.0-CYD-PUBLIC-WIZARD" > firmware/esp32-cyd-ili9341/version.txt
-
           sha256sum firmware/esp32-cyd-ili9341/latest.bin | awk '{print $1}' > firmware/esp32-cyd-ili9341/latest.sha256
 
-          echo "Prepared artifacts:"
           ls -lh firmware/esp32-cyd-ili9341
 
-      - name: Upload build artifact
+      - name: Upload CYD artifact
         uses: actions/upload-artifact@v4
         with:
           name: esp32-cyd-ili9341-firmware
           path: firmware/esp32-cyd-ili9341
 
-      - name: Publish OTA firmware
+      - name: Publish CYD OTA firmware
         if: github.event_name == 'workflow_dispatch'
         env:
           OTA_REPO_TOKEN: ${{ secrets.OTA_REPO_TOKEN }}
@@ -144,13 +140,148 @@ jobs:
           cp firmware/esp32-cyd-ili9341/latest.sha256 ota-repo/firmware/esp32-cyd-ili9341/latest.sha256
 
           cd ota-repo
-
           git add firmware/esp32-cyd-ili9341/latest.bin firmware/esp32-cyd-ili9341/version.txt firmware/esp32-cyd-ili9341/latest.sha256
 
           if git diff --cached --quiet; then
-            echo "No OTA changes to publish."
+            echo "No CYD OTA changes to publish."
             exit 0
           fi
 
           git commit -m "Publish ESP32 CYD ILI9341 firmware V10.5.0"
+          git push
+
+  build-esp32-headless:
+    name: Build ESP32 Headless WebUI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Configure Arduino CLI
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core install esp32:esp32@2.0.17
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "TFT_eSPI@2.5.43"
+          arduino-cli lib install "ArduinoJson@7.4.3"
+          arduino-cli lib install "WiFiManager@2.0.17"
+          arduino-cli lib install "XPT2046_Touchscreen@1.4"
+
+      - name: Force safe TFT_eSPI setup for headless compile
+        run: |
+          TFT_SETUP="/home/runner/Arduino/libraries/TFT_eSPI/User_Setup.h"
+
+          if [ ! -d "/home/runner/Arduino/libraries/TFT_eSPI" ]; then
+            echo "TFT_eSPI library folder not found"
+            ls -la /home/runner/Arduino/libraries || true
+            exit 1
+          fi
+
+          cat > "$TFT_SETUP" <<'EOF'
+          #pragma once
+
+          #define USER_SETUP_LOADED 1
+
+          #define ILI9341_DRIVER
+
+          #define TFT_WIDTH  240
+          #define TFT_HEIGHT 320
+
+          #define TFT_MISO 12
+          #define TFT_MOSI 13
+          #define TFT_SCLK 14
+          #define TFT_CS   15
+          #define TFT_DC    2
+          #define TFT_RST  -1
+
+          #define TFT_BL   21
+          #define TFT_BACKLIGHT_ON HIGH
+
+          #define LOAD_GLCD
+          #define LOAD_FONT2
+          #define LOAD_FONT4
+          #define LOAD_FONT6
+          #define LOAD_FONT7
+          #define LOAD_FONT8
+          #define LOAD_GFXFF
+          #define SMOOTH_FONT
+
+          #define SPI_FREQUENCY       10000000
+          #define SPI_READ_FREQUENCY   5000000
+          #define SPI_TOUCH_FREQUENCY  2500000
+          EOF
+
+      - name: Compile ESP32 headless firmware
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashMode=qio,FlashFreq=80,CPUFreq=240,UploadSpeed=115200,DebugLevel=none,PSRAM=disabled" \
+            --build-property compiler.cpp.extra_flags="-fpermissive -DVIC_TARGET_ESP32_HEADLESS" \
+            --output-dir build/esp32-headless \
+            Victron_Display_Web
+
+      - name: Prepare ESP32 headless firmware artifacts
+        run: |
+          mkdir -p firmware/esp32-headless
+
+          BIN_FILE="$(find build/esp32-headless -name '*.bin' | grep -v bootloader | grep -v partitions | head -n1)"
+
+          if [ -z "$BIN_FILE" ]; then
+            echo "Firmware .bin not found"
+            find build/esp32-headless -type f
+            exit 1
+          fi
+
+          cp "$BIN_FILE" firmware/esp32-headless/latest.bin
+          echo "V10.5.1-ESP32-HEADLESS-PUBLIC-WIZARD" > firmware/esp32-headless/version.txt
+          sha256sum firmware/esp32-headless/latest.bin | awk '{print $1}' > firmware/esp32-headless/latest.sha256
+
+          ls -lh firmware/esp32-headless
+
+      - name: Upload ESP32 headless artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-headless-firmware
+          path: firmware/esp32-headless
+
+      - name: Publish ESP32 headless OTA firmware
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OTA_REPO_TOKEN: ${{ secrets.OTA_REPO_TOKEN }}
+        run: |
+          if [ -z "$OTA_REPO_TOKEN" ]; then
+            echo "OTA_REPO_TOKEN secret is not configured. Skipping OTA publish."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git clone https://x-access-token:${OTA_REPO_TOKEN}@github.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota.git ota-repo
+
+          mkdir -p ota-repo/firmware/esp32-headless
+
+          cp firmware/esp32-headless/latest.bin ota-repo/firmware/esp32-headless/latest.bin
+          cp firmware/esp32-headless/version.txt ota-repo/firmware/esp32-headless/version.txt
+          cp firmware/esp32-headless/latest.sha256 ota-repo/firmware/esp32-headless/latest.sha256
+
+          cd ota-repo
+          git add firmware/esp32-headless/latest.bin firmware/esp32-headless/version.txt firmware/esp32-headless/latest.sha256
+
+          if git diff --cached --quiet; then
+            echo "No ESP32 headless OTA changes to publish."
+            exit 0
+          fi
+
+          git commit -m "Publish ESP32 headless firmware V10.5.1"
           git push
