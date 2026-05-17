@@ -19,12 +19,25 @@
 #include "hardware_profiles.h"
 
 // ======================================================
-// Firmware identity
+// Firmware identity by target
 // ======================================================
 
-#define VIC_PUBLIC_BUILD                      1
-#define VIC_FW_NAME                           "Victron VE.Direct ESP32 Monitor"
-#define VIC_FW_VERSION                        "V10.5.0-CYD-PUBLIC-WIZARD"
+#define VIC_PUBLIC_BUILD 1
+#define VIC_FW_NAME "Victron VE.Direct ESP32 Monitor"
+
+#if defined(VIC_TARGET_CYD_ILI9341)
+  #define VIC_FW_VERSION "V10.5.0-CYD-PUBLIC-WIZARD"
+#elif defined(VIC_TARGET_ESP32_HEADLESS)
+  #define VIC_FW_VERSION "V10.5.1-ESP32-HEADLESS-PUBLIC-WIZARD"
+#elif defined(VIC_TARGET_ESP32S3_HEADLESS)
+  #define VIC_FW_VERSION "V10.5.1-ESP32S3-HEADLESS-PUBLIC-WIZARD"
+#elif defined(VIC_TARGET_ESP32S3_ILI9341)
+  #define VIC_FW_VERSION "V10.6.0-ESP32S3-ILI9341-PUBLIC-WIZARD"
+#elif defined(VIC_TARGET_ESP32S3_ST7796)
+  #define VIC_FW_VERSION "V10.6.0-ESP32S3-ST7796-PUBLIC-WIZARD"
+#else
+  #define VIC_FW_VERSION "V10.5.0-PUBLIC-WIZARD"
+#endif
 
 // ======================================================
 // Hardware defaults
@@ -50,15 +63,37 @@
 #define VIC_DEFAULT_SETUP_AP_PASSWORD         "12345678"
 
 // ======================================================
-// OTA defaults - public OTA repository
+// OTA defaults by target
 // ======================================================
 
 #define VIC_DEFAULT_OTA_ENABLED               true
 #define VIC_DEFAULT_OTA_CHANNEL               "stable"
 
-#define VIC_DEFAULT_OTA_VERSION_URL           "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/version.txt"
-#define VIC_DEFAULT_OTA_BIN_URL               "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.bin"
-#define VIC_DEFAULT_OTA_SHA256_URL            "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.sha256"
+#if defined(VIC_TARGET_CYD_ILI9341)
+
+  #define VIC_DEFAULT_OTA_VERSION_URL "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/version.txt"
+  #define VIC_DEFAULT_OTA_BIN_URL     "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.bin"
+  #define VIC_DEFAULT_OTA_SHA256_URL  "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.sha256"
+
+#elif defined(VIC_TARGET_ESP32_HEADLESS)
+
+  #define VIC_DEFAULT_OTA_VERSION_URL "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/version.txt"
+  #define VIC_DEFAULT_OTA_BIN_URL     "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/latest.bin"
+  #define VIC_DEFAULT_OTA_SHA256_URL  "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-headless/latest.sha256"
+
+#elif defined(VIC_TARGET_ESP32S3_HEADLESS)
+
+  #define VIC_DEFAULT_OTA_VERSION_URL "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/version.txt"
+  #define VIC_DEFAULT_OTA_BIN_URL     "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/latest.bin"
+  #define VIC_DEFAULT_OTA_SHA256_URL  "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32s3-headless/latest.sha256"
+
+#else
+
+  #define VIC_DEFAULT_OTA_VERSION_URL "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/version.txt"
+  #define VIC_DEFAULT_OTA_BIN_URL     "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.bin"
+  #define VIC_DEFAULT_OTA_SHA256_URL  "https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/esp32-cyd-ili9341/latest.sha256"
+
+#endif
 
 // ======================================================
 // Plant defaults
