@@ -74,6 +74,74 @@ void handlePublicSetupSave(WebServer &server) {
   pubCfg.deviceProtocolStatus = publicProtocolStatusFor(pubCfg.deviceProtocol);
   pubCfg.deviceProtocolNote = publicProtocolNoteFor(pubCfg.deviceProtocol);
 
+  // EPEVER / RS485
+  pubCfg.epeverEnabled = server.hasArg("epeverEnabled");
+
+  pubCfg.epeverSlaveId = (uint8_t)publicSafeIntArg(
+    server.arg("epeverSlaveId"),
+    pubCfg.epeverSlaveId,
+    1,
+    247
+  );
+
+  pubCfg.epeverBaudrate = publicSafeUIntArg(
+    server.arg("epeverBaudrate"),
+    pubCfg.epeverBaudrate,
+    1200,
+    921600
+  );
+
+  pubCfg.epeverRxPin = publicSafeIntArg(
+    server.arg("epeverRxPin"),
+    pubCfg.epeverRxPin,
+    -1,
+    48
+  );
+
+  pubCfg.epeverTxPin = publicSafeIntArg(
+    server.arg("epeverTxPin"),
+    pubCfg.epeverTxPin,
+    -1,
+    48
+  );
+
+  pubCfg.epeverDeRePin = publicSafeIntArg(
+    server.arg("epeverDeRePin"),
+    pubCfg.epeverDeRePin,
+    -1,
+    48
+  );
+
+  pubCfg.epeverPollIntervalMs = publicSafeUIntArg(
+    server.arg("epeverPollIntervalMs"),
+    pubCfg.epeverPollIntervalMs,
+    500,
+    60000
+  );
+
+  // Remote WebUI Tunnel
+  pubCfg.tunnelEnabled = server.hasArg("tunnelEnabled");
+  pubCfg.tunnelServerUrl = publicSafeStringArg(server.arg("tunnelServerUrl"), pubCfg.tunnelServerUrl);
+  pubCfg.tunnelDeviceId = publicSafeStringArg(server.arg("tunnelDeviceId"), pubCfg.tunnelDeviceId);
+  pubCfg.tunnelDeviceToken = publicSafeStringArg(server.arg("tunnelDeviceToken"), pubCfg.tunnelDeviceToken);
+  pubCfg.tunnelReadOnly = server.hasArg("tunnelReadOnly");
+  pubCfg.tunnelAllowRemoteSetup = server.hasArg("tunnelAllowRemoteSetup");
+  pubCfg.tunnelAllowDangerous = server.hasArg("tunnelAllowDangerous");
+
+  pubCfg.tunnelPollMs = publicSafeUIntArg(
+    server.arg("tunnelPollMs"),
+    pubCfg.tunnelPollMs,
+    1000,
+    60000
+  );
+
+  pubCfg.tunnelMaxResponseBytes = publicSafeUIntArg(
+    server.arg("tunnelMaxResponseBytes"),
+    pubCfg.tunnelMaxResponseBytes,
+    1000,
+    60000
+  );
+
   // Runtime pins
   pubCfg.veDirectRxPin = publicSafeIntArg(
     server.arg("veDirectRxPin"),
@@ -241,10 +309,14 @@ void handlePublicSetupSave(WebServer &server) {
   html += "</head><body>";
   html += "<div class='box'>";
   html += "<h2>Setup saved</h2>";
-  html += "<p>Configuration has been saved. Some changes, such as WiFi hostname, VE.Direct pin, protocol profile or OTA URLs, may require a reboot.</p>";
+  html += "<p>Configuration has been saved. Some changes, such as WiFi hostname, VE.Direct pin, EPEVER/RS485 settings, tunnel settings or OTA URLs, may require a reboot.</p>";
 
   if (!publicProtocolIsSupported(pubCfg.deviceProtocol)) {
-    html += "<p><b>Warning:</b> selected protocol profile is planned but not supported by this firmware yet. The current parser still supports VE.Direct-compatible data.</p>";
+    html += "<p><b>Warning:</b> selected protocol profile is planned but not supported by this firmware yet.</p>";
+  }
+
+  if (pubCfg.tunnelEnabled && pubCfg.tunnelDeviceToken.length() == 0) {
+    html += "<p><b>Warning:</b> remote tunnel is enabled but device token is empty.</p>";
   }
 
   html += "<p>Redirecting to dashboard...</p>";
@@ -261,7 +333,7 @@ void handlePublicSetupSave(WebServer &server) {
 
 String buildPublicWizardHtml() {
   String html;
-  html.reserve(27000);
+  html.reserve(36000);
 
   html += "<!doctype html><html><head>";
   html += "<meta charset='utf-8'>";
@@ -308,14 +380,13 @@ String buildPublicWizardHtml() {
   html += "<main>";
 
   html += "<div class='notice'>";
-  html += "<b>Public edition.</b> This wizard configures runtime settings such as protocol profile, VE.Direct pin, battery ADC, WiFiManager, OTA, plant data, logging and WebUI. ";
+  html += "<b>Public edition.</b> Configure runtime settings such as protocol profile, VE.Direct pin, EPEVER/RS485, Remote WebUI Tunnel, WiFiManager, OTA, plant data, logging and WebUI. ";
   html += "Display/touch/SPI are compile-time target settings and are not changed here.";
   html += "</div>";
 
   if (!publicProtocolIsSupported(pubCfg.deviceProtocol)) {
     html += "<div class='notice warn'>";
-    html += "<b>Compatibility warning.</b> The selected protocol profile is marked as planned, not supported by this firmware yet. ";
-    html += "Current working parser supports Victron VE.Direct and VE.Direct-like text data.";
+    html += "<b>Compatibility warning.</b> The selected protocol profile is marked as planned, not fully supported by this firmware yet.";
     html += "</div>";
   }
 
@@ -337,8 +408,40 @@ String buildPublicWizardHtml() {
   protoBody += wizardProtocolSelect();
   protoBody += "<div class='field'><label>Current protocol status</label><div class='readonly'>" + publicHtmlEscape(pubCfg.deviceProtocolLabel) + " · " + publicHtmlEscape(pubCfg.deviceProtocolStatus) + "</div></div>";
   protoBody += "<p class='help'>" + publicHtmlEscape(pubCfg.deviceProtocolNote) + "</p>";
-  protoBody += "<p class='help'>Supported now: Victron VE.Direct and generic VE.Direct-like text. Planned profiles are visible for roadmap compatibility but require future parser/driver implementation.</p>";
+  protoBody += "<p class='help'>Supported now: Victron VE.Direct, generic VE.Direct-like text and EPEVER RS485 Modbus driver. Planned profiles are roadmap entries and need future drivers/parsers.</p>";
   html += wizardSection("Device / protocol profile", protoBody);
+
+  // EPEVER section
+  String epeverBody;
+  epeverBody += wizardCheckbox("epeverEnabled", "Enable EPEVER / RS485 Modbus polling", pubCfg.epeverEnabled, "Enable only when using EPEVER / EPsolar / Tracer RS485 Modbus or for testing offline state.");
+  epeverBody += "<div class='grid'>";
+  epeverBody += wizardInputNumber("epeverSlaveId", "EPEVER Modbus slave ID", String(pubCfg.epeverSlaveId), "Default is usually 1.", "1");
+  epeverBody += wizardInputNumber("epeverBaudrate", "EPEVER baudrate", String(pubCfg.epeverBaudrate), "Common values: 9600, 115200. Current default: 115200.", "1");
+  epeverBody += wizardInputNumber("epeverRxPin", "RS485 RX GPIO", String(pubCfg.epeverRxPin), "ESP32 RX pin connected to RS485 module RO.", "1");
+  epeverBody += wizardInputNumber("epeverTxPin", "RS485 TX GPIO", String(pubCfg.epeverTxPin), "ESP32 TX pin connected to RS485 module DI.", "1");
+  epeverBody += wizardInputNumber("epeverDeRePin", "RS485 DE/RE GPIO", String(pubCfg.epeverDeRePin), "Use -1 if your RS485 module has automatic direction control.", "1");
+  epeverBody += wizardInputNumber("epeverPollIntervalMs", "EPEVER poll interval ms", String(pubCfg.epeverPollIntervalMs), "Default: 2000 ms.", "100");
+  epeverBody += "</div>";
+  epeverBody += "<p class='help'>Hardware required: TTL-to-RS485 module such as SP3485/MAX485. Do not connect RS485 A/B directly to ESP32 GPIO.</p>";
+  html += wizardSection("EPEVER / RS485 Modbus", epeverBody);
+
+  // Remote WebUI Tunnel section
+  String tunnelBody;
+  tunnelBody += wizardCheckbox("tunnelEnabled", "Enable Remote WebUI Tunnel", pubCfg.tunnelEnabled, "ESP32 opens an outgoing connection to your tunnel server so the original WebUI can be reached remotely without Tailscale or port forwarding.");
+  tunnelBody += "<div class='grid'>";
+  tunnelBody += wizardInputText("tunnelServerUrl", "Tunnel server URL", pubCfg.tunnelServerUrl, "Example: https://your-domain.com or http://your-server-ip:8080");
+  tunnelBody += wizardInputText("tunnelDeviceId", "Tunnel device ID", pubCfg.tunnelDeviceId, "Example: SLINK-0001. Must be unique per device.");
+  tunnelBody += wizardInputPassword("tunnelDeviceToken", "Tunnel device token", pubCfg.tunnelDeviceToken, "Secret token used to authenticate this ESP32 to your tunnel server.");
+  tunnelBody += wizardInputNumber("tunnelPollMs", "Tunnel poll / keepalive ms", String(pubCfg.tunnelPollMs), "Default: 2000 ms.", "100");
+  tunnelBody += wizardInputNumber("tunnelMaxResponseBytes", "Max remote response bytes", String(pubCfg.tunnelMaxResponseBytes), "Safety limit for proxied WebUI responses. Default: 12000.", "1000");
+  tunnelBody += "</div>";
+  tunnelBody += "<div class='grid'>";
+  tunnelBody += wizardCheckbox("tunnelReadOnly", "Remote read-only mode", pubCfg.tunnelReadOnly, "Recommended. Blocks risky remote operations.");
+  tunnelBody += wizardCheckbox("tunnelAllowRemoteSetup", "Allow remote setup POST", pubCfg.tunnelAllowRemoteSetup, "Allow saving setup remotely. Keep OFF until tunnel is tested.");
+  tunnelBody += wizardCheckbox("tunnelAllowDangerous", "Allow dangerous remote commands", pubCfg.tunnelAllowDangerous, "Allows shutdown/reboot/reset/OTA-like operations if implemented. Keep OFF for safety.");
+  tunnelBody += "</div>";
+  tunnelBody += "<p class='help'>First safe version should use read-only mode. OTA upload, factory reset, shutdown and reboot should stay blocked remotely unless explicitly enabled and protected.</p>";
+  html += wizardSection("Remote WebUI Tunnel", tunnelBody);
 
   // Pins
   String pinsBody;
@@ -356,7 +459,7 @@ String buildPublicWizardHtml() {
   netBody += "<div class='grid'>";
   netBody += wizardInputText("hostname", "Hostname", pubCfg.hostname, "Example: victron-esp32-monitor");
   netBody += wizardInputText("setupApSsid", "WiFiManager setup AP SSID", pubCfg.setupApSsid, "Fallback AP name used when WiFi is not configured.");
-  netBody += wizardInputText("setupApPassword", "WiFiManager setup AP password", pubCfg.setupApPassword, "Minimum 8 characters recommended.");
+  netBody += wizardInputPassword("setupApPassword", "WiFiManager setup AP password", pubCfg.setupApPassword, "Minimum 8 characters recommended.");
   netBody += "</div>";
   html += wizardSection("Network / WiFiManager", netBody);
 
@@ -436,6 +539,7 @@ String buildPublicWizardHtml() {
   html += "<div class='actions'>";
   html += "<button class='primary' type='submit'>Save setup</button>";
   html += "<a class='btn' href='/setup-json'>View config JSON</a>";
+  html += "<a class='btn' href='/tunnel-status'>Tunnel status</a>";
   html += "<a class='btn' href='/'>Dashboard</a>";
   html += "<a class='btn danger' href='/setup-reset' onclick=\"return confirm('Reset all public configuration to defaults?')\">Factory reset config</a>";
   html += "</div>";
@@ -443,8 +547,9 @@ String buildPublicWizardHtml() {
   html += "</form>";
 
   html += "<div class='notice'>";
-  html += "<b>Wiring for VE.Direct:</b> device TX → ESP32 RX GPIO, device GND → ESP32 GND. ";
-  html += "Do not power the ESP32 from VE.Direct 5V unless your hardware design explicitly supports it.";
+  html += "<b>VE.Direct wiring:</b> device TX → ESP32 RX GPIO, device GND → ESP32 GND. ";
+  html += "<b>RS485 wiring:</b> use a TTL-to-RS485 transceiver; do not connect A/B directly to ESP32 GPIO. ";
+  html += "<b>Remote tunnel:</b> ESP32 connects outward to your server; no port forwarding or Tailscale required.";
   html += "</div>";
 
   html += "</main>";
@@ -467,6 +572,21 @@ String wizardInputText(
   html += "<div class='field'>";
   html += "<label for='" + publicHtmlEscape(name) + "'>" + publicHtmlEscape(label) + "</label>";
   html += "<input id='" + publicHtmlEscape(name) + "' name='" + publicHtmlEscape(name) + "' type='text' value='" + publicHtmlEscape(value) + "'>";
+  if (help.length()) html += "<div class='help'>" + publicHtmlEscape(help) + "</div>";
+  html += "</div>";
+  return html;
+}
+
+String wizardInputPassword(
+  const String &name,
+  const String &label,
+  const String &value,
+  const String &help
+) {
+  String html;
+  html += "<div class='field'>";
+  html += "<label for='" + publicHtmlEscape(name) + "'>" + publicHtmlEscape(label) + "</label>";
+  html += "<input id='" + publicHtmlEscape(name) + "' name='" + publicHtmlEscape(name) + "' type='password' value='" + publicHtmlEscape(value) + "'>";
   if (help.length()) html += "<div class='help'>" + publicHtmlEscape(help) + "</div>";
   html += "</div>";
   return html;
@@ -515,7 +635,7 @@ String wizardProtocolSelect() {
   ProtocolOption options[] = {
     { VIC_PROTOCOL_VEDIRECT, "Victron VE.Direct", "supported" },
     { VIC_PROTOCOL_GENERIC_VEDIRECT, "Generic VE.Direct text", "supported" },
-    { VIC_PROTOCOL_EPEVER_MODBUS, "Epever / Tracer RS485 Modbus", "planned" },
+    { VIC_PROTOCOL_EPEVER_MODBUS, "Epever / Tracer RS485 Modbus", "supported/beta" },
     { VIC_PROTOCOL_RENOGY_RS485, "Renogy RS485", "planned" },
     { VIC_PROTOCOL_DALY_BMS, "Daly BMS UART/RS485", "planned" },
     { VIC_PROTOCOL_JBD_BMS, "JBD BMS UART", "planned" },
