@@ -61,11 +61,12 @@
 #include "mbedtls/sha256.h"
 #include "public_config.h"
 #include "public_wizard.h"
+#include "protocol_epever.h"
 
 const char* WIFI_SSID = "";  // Public build: no hardcoded WiFi SSID
 const char* WIFI_PASS = "";  // Public build: no hardcoded WiFi password
 const char* HOSTNAME  = "victron-esp32-monitor";
-const char* FW_VERSION = "V10.5.2-CYD-PUBLIC-WIZARD";
+const char* FW_VERSION = "V10.5.3-PUBLIC-MULTIPROTOCOL-EPEVER";
 const char* FW_BUILD_DATE = __DATE__;
 const char* FW_BUILD_TIME = __TIME__;
 
@@ -999,6 +1000,10 @@ void parseVictronLine(const String& line) {
 }
 
 void restartVictronSerial(const String& reason) {
+  if (pubCfg.deviceProtocol == VIC_PROTOCOL_EPEVER_MODBUS) {
+    lastVictronReinitReason = String("skip_epever_") + reason;
+    return;
+  }
   VictronSerial.end();
   delay(20);
   rxLine = "";
@@ -9760,6 +9765,47 @@ void handleBatteryHealthPage() {
   server.send(200, "text/html", html);
 }
 
+
+// ======================================================
+// Public multi-protocol bridge: EPEVER -> legacy dashboard data model
+// ======================================================
+
+bool publicEpeverModeActive() {
+  return pubCfg.deviceProtocol == VIC_PROTOCOL_EPEVER_MODBUS || pubCfg.epeverEnabled;
+}
+
+void applyEpeverTelemetryToLegacyData() {
+  if (!publicEpeverModeActive()) return;
+
+  if (epeverIsOnline()) {
+    if (isfinite(epever.pvVoltage)) panelV = epever.pvVoltage;
+    if (isfinite(epever.pvPower)) panelW = epever.pvPower;
+
+    if (isfinite(epever.batteryVoltage)) battV = epever.batteryVoltage;
+    if (isfinite(epever.batteryCurrent)) battA = epever.batteryCurrent;
+    if (isfinite(epever.batteryPower)) battW = epever.batteryPower;
+    else if (isfinite(battV) && isfinite(battA)) battW = battV * battA;
+
+    if (isfinite(epever.loadCurrent)) loadCurrentA = epever.loadCurrent;
+
+    modelName = "EPEVER RS485";
+    firmwareVer = "Modbus RTU";
+    serialNumber = "EPEVER";
+    mpptState = "EPEVER";
+    errorState = "0";
+
+    if (isfinite(epever.pvPower) && epever.pvPower > 2.0f) chargeState = "Bulk";
+    else chargeState = "Off";
+
+    victronSeen = true;
+    lastVictronMs = millis();
+  } else {
+    modelName = "EPEVER RS485";
+    mpptState = "EPEVER";
+    errorState = epever.lastError.length() ? epever.lastError : "offline";
+  }
+}
+
 void setup() {
   lastUserActivityMs = millis();
   // V10.4.73: VE.Direct e' su IO27, quindi IO35 resta libero e non disturba GPIO34 batteria ESP.
@@ -9820,9 +9866,21 @@ void setup() {
   // In alcune CYD la init del touch durante la schermata boot sporca il bus e fa
   // sembrare il progresso tornato a zero. Lo inizializziamo alla fine, a TFT stabile.
   drawBootProgress("Seriale Victron", 45);
-  VictronSerial.begin(VICTRON_BAUD, SERIAL_8N1, pubCfg.veDirectRxPin, VICTRON_TX);
-  lastVictronReinitMs = millis();
-  lastVictronReinitReason = "boot";
+  if (publicEpeverModeActive()) {
+    epeverBegin(
+      pubCfg.epeverSlaveId,
+      pubCfg.epeverBaudrate,
+      pubCfg.epeverRxPin,
+      pubCfg.epeverTxPin,
+      pubCfg.epeverDeRePin
+    );
+    lastVictronReinitMs = millis();
+    lastVictronReinitReason = "epever_boot";
+  } else {
+    VictronSerial.begin(VICTRON_BAUD, SERIAL_8N1, pubCfg.veDirectRxPin, VICTRON_TX);
+    lastVictronReinitMs = millis();
+    lastVictronReinitReason = "boot";
+  }
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(runtimeHostname().c_str());
@@ -10031,6 +10089,8 @@ void setup() {
   server.on("/ota-status", HTTP_GET, handleOtaStatus);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   registerPublicWizardRoutes(server);
+  server.on("/epever-json", HTTP_GET, []() { server.send(200, "application/json", epeverJson(true)); });
+  server.on("/epever-status", HTTP_GET, []() { server.send(200, "text/plain", epeverStatusText()); });
   server.onNotFound(handleNotFound);
   server.begin();
   addEventLog("WEB", "Server web avviato");
@@ -10133,8 +10193,13 @@ void loop() {
   checkGithubUpdate(false);
   weeklyGithubUpdateLoop();
   safeBootLoop();
-  readVictron();
-  victronAutoRecoveryLoop();
+  if (publicEpeverModeActive()) {
+    epeverLoop(pubCfg.epeverPollIntervalMs);
+    applyEpeverTelemetryToLegacyData();
+  } else {
+    readVictron();
+    victronAutoRecoveryLoop();
+  }
   updateHistory();
   batteryHealthLoop();
   nightPowerSaverLoop();
