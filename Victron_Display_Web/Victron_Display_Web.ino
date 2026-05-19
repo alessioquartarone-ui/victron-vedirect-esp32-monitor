@@ -10097,7 +10097,7 @@ void setup() {
   server.on("/tunnel-status.txt", HTTP_GET, []() { server.send(200, "text/plain", remoteTunnelStatusText()); });
   server.onNotFound(handleNotFound);
   server.begin();
-  remoteTunnelStartFromConfig();
+  remoteTunnelBegin();
   addEventLog("WEB", "Server web avviato");
   drawBootProgress("Server web avviato", 85);
   rollbackInitAndValidate();
