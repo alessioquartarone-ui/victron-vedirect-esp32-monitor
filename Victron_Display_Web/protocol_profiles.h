@@ -4,12 +4,13 @@
   Victron VE.Direct ESP32 Monitor
   Public protocol/device compatibility profiles
 
-  Current real supported protocol:
+  Current supported protocols:
   - Victron VE.Direct text protocol over UART
   - Generic VE.Direct-like text protocol
+  - EPEVER / EPsolar / Tracer RS485 Modbus RTU beta
 
-  Planned future profiles are listed for public roadmap / wizard visibility,
-  but they must not be treated as fully supported until the parser/driver exists.
+  Planned future profiles are listed for roadmap / wizard visibility.
+  They are NOT fully supported until the parser/driver is implemented.
 */
 
 // ======================================================
@@ -35,7 +36,8 @@
 #define VIC_DEFAULT_PROTOCOL_LABEL          "Victron VE.Direct"
 #define VIC_DEFAULT_PROTOCOL_STATUS         "supported"
 
-// Compatibility aliases, in case config_user.example.h uses these names
+// Compatibility aliases.
+// Some files may use these longer names.
 #define VIC_DEFAULT_DEVICE_PROTOCOL         VIC_DEFAULT_PROTOCOL_PROFILE
 #define VIC_DEFAULT_DEVICE_PROTOCOL_LABEL   VIC_DEFAULT_PROTOCOL_LABEL
 #define VIC_DEFAULT_DEVICE_PROTOCOL_STATUS  VIC_DEFAULT_PROTOCOL_STATUS
@@ -47,7 +49,9 @@
 #define VIC_SUPPORTS_VEDIRECT               1
 #define VIC_SUPPORTS_GENERIC_VEDIRECT       1
 
-#define VIC_SUPPORTS_EPEVER_MODBUS          0
+// EPEVER parser/driver exists, but real device testing is still required.
+#define VIC_SUPPORTS_EPEVER_MODBUS          1
+
 #define VIC_SUPPORTS_RENOGY_RS485           0
 #define VIC_SUPPORTS_DALY_BMS               0
 #define VIC_SUPPORTS_JBD_BMS                0
@@ -56,11 +60,14 @@
 #define VIC_SUPPORTS_GENERIC_UART_TEXT      0
 
 // ======================================================
-// Notes for README / wizard
+// Compatibility notes
 // ======================================================
 
 #define VIC_COMPAT_NOTE_VEDIRECT \
   "Supported now. Connect device TX to ESP32 RX GPIO and device GND to ESP32 GND."
+
+#define VIC_COMPAT_NOTE_EPEVER \
+  "Supported in beta. Requires TTL-to-RS485 transceiver such as SP3485/MAX485 and correct Modbus settings."
 
 #define VIC_COMPAT_NOTE_MODBUS \
   "Planned. Requires RS485 transceiver such as MAX485/SP3485 and a Modbus parser."
