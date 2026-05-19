@@ -72,6 +72,10 @@ String publicProtocolNoteFor(const String &protocolId) {
     return "Supported now for devices using a VE.Direct-like text output compatible with the current parser.";
   }
 
+  if (protocolId == VIC_PROTOCOL_EPEVER_MODBUS) {
+    return "EPEVER / EPsolar / Tracer RS485 Modbus RTU support. Requires TTL-to-RS485 transceiver.";
+  }
+
   if (protocolId == VIC_PROTOCOL_EPEVER_MODBUS ||
       protocolId == VIC_PROTOCOL_RENOGY_RS485 ||
       protocolId == VIC_PROTOCOL_GENERIC_MODBUS_RTU) {
@@ -106,25 +110,24 @@ void applyPublicDefaults() {
   pubCfg.deviceProtocolNote = VIC_COMPAT_NOTE_VEDIRECT;
 
   // EPEVER defaults
-  pubCfg.epeverEnabled = false;
-  pubCfg.epeverSlaveId = 1;
-  pubCfg.epeverBaudrate = 115200;
+  pubCfg.epeverEnabled = VIC_DEFAULT_EPEVER_ENABLED;
+  pubCfg.epeverSlaveId = VIC_DEFAULT_EPEVER_SLAVE_ID;
+  pubCfg.epeverBaudrate = VIC_DEFAULT_EPEVER_BAUDRATE;
+  pubCfg.epeverRxPin = VIC_USER_DEFAULT_EPEVER_RX_PIN;
+  pubCfg.epeverTxPin = VIC_USER_DEFAULT_EPEVER_TX_PIN;
+  pubCfg.epeverDeRePin = VIC_USER_DEFAULT_EPEVER_DERE_PIN;
+  pubCfg.epeverPollIntervalMs = VIC_DEFAULT_EPEVER_POLL_MS;
 
-#if defined(VIC_TARGET_CYD_ILI9341)
-  pubCfg.epeverRxPin = 27;
-  pubCfg.epeverTxPin = 26;
-  pubCfg.epeverDeRePin = 22;
-#elif defined(VIC_TARGET_ESP32_HEADLESS)
-  pubCfg.epeverRxPin = 16;
-  pubCfg.epeverTxPin = 17;
-  pubCfg.epeverDeRePin = 4;
-#else
-  pubCfg.epeverRxPin = 18;
-  pubCfg.epeverTxPin = 17;
-  pubCfg.epeverDeRePin = 16;
-#endif
-
-  pubCfg.epeverPollIntervalMs = 2000;
+  // Remote WebUI Tunnel defaults
+  pubCfg.tunnelEnabled = false;
+  pubCfg.tunnelServerUrl = "";
+  pubCfg.tunnelDeviceId = "SLINK-0001";
+  pubCfg.tunnelDeviceToken = "";
+  pubCfg.tunnelReadOnly = true;
+  pubCfg.tunnelAllowRemoteSetup = false;
+  pubCfg.tunnelAllowDangerous = false;
+  pubCfg.tunnelPollMs = 2000;
+  pubCfg.tunnelMaxResponseBytes = 12000;
 
   pubCfg.veDirectRxPin = VIC_USER_DEFAULT_VEDIRECT_RX_PIN;
   pubCfg.espBatteryAdcPin = VIC_USER_DEFAULT_ESP_BAT_ADC_PIN;
@@ -206,6 +209,16 @@ void loadPublicConfig() {
   pubCfg.epeverDeRePin = prefGetInt("epDeRe", pubCfg.epeverDeRePin);
   pubCfg.epeverPollIntervalMs = prefGetUInt("epPoll", pubCfg.epeverPollIntervalMs);
 
+  pubCfg.tunnelEnabled = prefGetBool("tunEn", pubCfg.tunnelEnabled);
+  pubCfg.tunnelServerUrl = prefGetString("tunUrl", pubCfg.tunnelServerUrl);
+  pubCfg.tunnelDeviceId = prefGetString("tunDev", pubCfg.tunnelDeviceId);
+  pubCfg.tunnelDeviceToken = prefGetString("tunTok", pubCfg.tunnelDeviceToken);
+  pubCfg.tunnelReadOnly = prefGetBool("tunRO", pubCfg.tunnelReadOnly);
+  pubCfg.tunnelAllowRemoteSetup = prefGetBool("tunSetup", pubCfg.tunnelAllowRemoteSetup);
+  pubCfg.tunnelAllowDangerous = prefGetBool("tunDanger", pubCfg.tunnelAllowDangerous);
+  pubCfg.tunnelPollMs = prefGetUInt("tunPoll", pubCfg.tunnelPollMs);
+  pubCfg.tunnelMaxResponseBytes = prefGetUInt("tunMax", pubCfg.tunnelMaxResponseBytes);
+
   pubCfg.veDirectRxPin = prefGetInt("vedRx", pubCfg.veDirectRxPin);
   pubCfg.espBatteryAdcPin = prefGetInt("espAdc", pubCfg.espBatteryAdcPin);
   pubCfg.espBatteryMultiplier = prefGetFloat("espMult", pubCfg.espBatteryMultiplier);
@@ -275,6 +288,12 @@ void loadPublicConfig() {
   pubCfg.epeverDeRePin = publicClampInt(pubCfg.epeverDeRePin, -1, 48);
   pubCfg.epeverPollIntervalMs = publicSafeUIntArg(String(pubCfg.epeverPollIntervalMs), 2000, 500, 60000);
 
+  pubCfg.tunnelServerUrl = publicSafeStringArg(pubCfg.tunnelServerUrl, "");
+  pubCfg.tunnelDeviceId = publicSafeStringArg(pubCfg.tunnelDeviceId, "SLINK-0001");
+  pubCfg.tunnelDeviceToken = publicSafeStringArg(pubCfg.tunnelDeviceToken, "");
+  pubCfg.tunnelPollMs = publicSafeUIntArg(String(pubCfg.tunnelPollMs), 2000, 1000, 60000);
+  pubCfg.tunnelMaxResponseBytes = publicSafeUIntArg(String(pubCfg.tunnelMaxResponseBytes), 12000, 1000, 60000);
+
   pubCfg.veDirectRxPin = publicClampInt(pubCfg.veDirectRxPin, -1, 48);
   pubCfg.espBatteryAdcPin = publicClampInt(pubCfg.espBatteryAdcPin, -1, 48);
   pubCfg.espBatteryMultiplier = publicClampFloat(pubCfg.espBatteryMultiplier, 0.10f, 10.00f);
@@ -323,6 +342,16 @@ void savePublicConfig() {
   vicPrefs.putInt("epTx", pubCfg.epeverTxPin);
   vicPrefs.putInt("epDeRe", pubCfg.epeverDeRePin);
   vicPrefs.putUInt("epPoll", pubCfg.epeverPollIntervalMs);
+
+  vicPrefs.putBool("tunEn", pubCfg.tunnelEnabled);
+  vicPrefs.putString("tunUrl", pubCfg.tunnelServerUrl);
+  vicPrefs.putString("tunDev", pubCfg.tunnelDeviceId);
+  vicPrefs.putString("tunTok", pubCfg.tunnelDeviceToken);
+  vicPrefs.putBool("tunRO", pubCfg.tunnelReadOnly);
+  vicPrefs.putBool("tunSetup", pubCfg.tunnelAllowRemoteSetup);
+  vicPrefs.putBool("tunDanger", pubCfg.tunnelAllowDangerous);
+  vicPrefs.putUInt("tunPoll", pubCfg.tunnelPollMs);
+  vicPrefs.putUInt("tunMax", pubCfg.tunnelMaxResponseBytes);
 
   vicPrefs.putInt("vedRx", pubCfg.veDirectRxPin);
   vicPrefs.putInt("espAdc", pubCfg.espBatteryAdcPin);
@@ -527,7 +556,7 @@ String publicConfigToJson(bool pretty) {
   String sp = pretty ? "  " : "";
 
   String json;
-  json.reserve(6400);
+  json.reserve(7600);
 
   json += "{" + nl;
 
@@ -549,6 +578,18 @@ String publicConfigToJson(bool pretty) {
   json += sp + sp + "\"txPin\":" + String(pubCfg.epeverTxPin) + "," + nl;
   json += sp + sp + "\"deRePin\":" + String(pubCfg.epeverDeRePin) + "," + nl;
   json += sp + sp + "\"pollIntervalMs\":" + String(pubCfg.epeverPollIntervalMs) + nl;
+  json += sp + "}," + nl;
+
+  json += sp + "\"remoteTunnel\":{" + nl;
+  json += sp + sp + "\"enabled\":" + String(pubCfg.tunnelEnabled ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"serverUrl\":\"" + publicHtmlEscape(pubCfg.tunnelServerUrl) + "\"," + nl;
+  json += sp + sp + "\"deviceId\":\"" + publicHtmlEscape(pubCfg.tunnelDeviceId) + "\"," + nl;
+  json += sp + sp + "\"tokenConfigured\":" + String(pubCfg.tunnelDeviceToken.length() > 0 ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"readOnly\":" + String(pubCfg.tunnelReadOnly ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"allowRemoteSetup\":" + String(pubCfg.tunnelAllowRemoteSetup ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"allowDangerous\":" + String(pubCfg.tunnelAllowDangerous ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"pollMs\":" + String(pubCfg.tunnelPollMs) + "," + nl;
+  json += sp + sp + "\"maxResponseBytes\":" + String(pubCfg.tunnelMaxResponseBytes) + nl;
   json += sp + "}," + nl;
 
   json += sp + "\"setupDone\":" + String(pubCfg.setupDone ? "true" : "false") + "," + nl;
@@ -598,6 +639,8 @@ String publicConfigSummaryText() {
   out += "Protocol: " + pubCfg.deviceProtocolLabel + " (" + pubCfg.deviceProtocolStatus + ")\n";
   out += "EPEVER: " + String(pubCfg.epeverEnabled ? "enabled" : "disabled") + "\n";
   out += "EPEVER RX/TX/DE: " + String(pubCfg.epeverRxPin) + "/" + String(pubCfg.epeverTxPin) + "/" + String(pubCfg.epeverDeRePin) + "\n";
+  out += "Remote tunnel: " + String(pubCfg.tunnelEnabled ? "enabled" : "disabled") + "\n";
+  out += "Tunnel device ID: " + pubCfg.tunnelDeviceId + "\n";
   out += "VE.Direct RX GPIO: " + String(pubCfg.veDirectRxPin) + "\n";
   out += "ESP Battery ADC GPIO: " + String(pubCfg.espBatteryAdcPin) + "\n";
   out += "Hostname: " + pubCfg.hostname + "\n";
