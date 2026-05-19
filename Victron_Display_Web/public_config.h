@@ -38,6 +38,15 @@ struct VictronPublicConfig {
   String deviceProtocolStatus;
   String deviceProtocolNote;
 
+  // EPEVER / EPsolar / Tracer RS485 Modbus settings
+  bool epeverEnabled;
+  uint8_t epeverSlaveId;
+  uint32_t epeverBaudrate;
+  int epeverRxPin;
+  int epeverTxPin;
+  int epeverDeRePin;
+  uint32_t epeverPollIntervalMs;
+
   // Runtime configurable pins
   int veDirectRxPin;
   int espBatteryAdcPin;
