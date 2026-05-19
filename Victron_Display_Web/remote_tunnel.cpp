@@ -1,4 +1,5 @@
 #include "remote_tunnel.h"
+#include "public_wizard.h"
 
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
