@@ -7,11 +7,22 @@ HardwareSerial EpeverSerial(2);
 #endif
 
 EpeverTelemetry epever;
+
 static ModbusMaster epeverNode;
 static int epeverDeRePin = -1;
+static bool epeverSerialStarted = false;
+
+// ======================================================
+// Small conversion helpers
+// ======================================================
 
 static float regToFloat100(uint16_t value) {
   return ((float)value) / 100.0f;
+}
+
+static float signedRegToFloat100(uint16_t value) {
+  int16_t signedValue = (int16_t)value;
+  return ((float)signedValue) / 100.0f;
 }
 
 static float regsToFloat100(uint16_t lowWord, uint16_t highWord) {
@@ -19,19 +30,27 @@ static float regsToFloat100(uint16_t lowWord, uint16_t highWord) {
   return ((float)raw) / 100.0f;
 }
 
+// ======================================================
+// RS485 direction control
+// ======================================================
+
 static void epeverPreTransmission() {
   if (epeverDeRePin >= 0) {
     digitalWrite(epeverDeRePin, HIGH);
-    delayMicroseconds(300);
+    delayMicroseconds(400);
   }
 }
 
 static void epeverPostTransmission() {
   if (epeverDeRePin >= 0) {
-    delayMicroseconds(300);
+    delayMicroseconds(400);
     digitalWrite(epeverDeRePin, LOW);
   }
 }
+
+// ======================================================
+// Defaults
+// ======================================================
 
 void epeverApplyDefaults() {
   epever.enabled = false;
@@ -44,9 +63,19 @@ void epeverApplyDefaults() {
   epever.slaveId = 1;
   epever.baudrate = 115200;
 
+#if defined(VIC_TARGET_CYD_ILI9341)
+  epever.rxPin = 27;
+  epever.txPin = 26;
+  epever.deRePin = 22;
+#elif defined(VIC_TARGET_ESP32_HEADLESS)
+  epever.rxPin = 16;
+  epever.txPin = 17;
+  epever.deRePin = 4;
+#else
   epever.rxPin = 18;
   epever.txPin = 17;
   epever.deRePin = 16;
+#endif
 
   epever.pvVoltage = NAN;
   epever.pvCurrent = NAN;
@@ -70,6 +99,10 @@ void epeverApplyDefaults() {
   epever.lastError = "";
 }
 
+// ======================================================
+// Begin / stop
+// ======================================================
+
 void epeverBegin(
   uint8_t slaveId,
   uint32_t baudrate,
@@ -78,6 +111,11 @@ void epeverBegin(
   int deRePin
 ) {
   epeverApplyDefaults();
+
+  if (slaveId < 1) slaveId = 1;
+  if (slaveId > 247) slaveId = 247;
+
+  if (baudrate < 1200) baudrate = 115200;
 
   epever.enabled = true;
   epever.slaveId = slaveId;
@@ -94,6 +132,7 @@ void epeverBegin(
   }
 
   EpeverSerial.begin(baudrate, SERIAL_8N1, rxPin, txPin);
+  epeverSerialStarted = true;
 
   epeverNode.begin(slaveId, EpeverSerial);
   epeverNode.preTransmission(epeverPreTransmission);
@@ -102,9 +141,37 @@ void epeverBegin(
   epever.lastError = "started";
 }
 
+void epeverStop() {
+  epever.enabled = false;
+  epever.online = false;
+
+  if (epeverSerialStarted) {
+    EpeverSerial.end();
+    epeverSerialStarted = false;
+  }
+
+  if (epeverDeRePin >= 0) {
+    digitalWrite(epeverDeRePin, LOW);
+  }
+
+  epever.lastError = "stopped";
+}
+
+// ======================================================
+// Polling
+// ======================================================
+
 bool epeverPollNow() {
   if (!epever.enabled) {
+    epever.online = false;
     epever.lastError = "not enabled";
+    return false;
+  }
+
+  if (!epeverSerialStarted) {
+    epever.online = false;
+    epever.errorCount++;
+    epever.lastError = "serial not started";
     return false;
   }
 
@@ -128,8 +195,8 @@ bool epeverPollNow() {
     0x310E Load power low              /100 W
     0x310F Load power high
 
-    0x3110 Battery temperature         /100 C
-    0x3111 Device temperature          /100 C
+    0x3110 Battery temperature         /100 °C, signed on some models
+    0x3111 Device temperature          /100 °C, signed on some models
   */
 
   uint8_t result = epeverNode.readInputRegisters(0x3100, 18);
@@ -158,9 +225,13 @@ bool epeverPollNow() {
   epever.loadCurrent = regToFloat100(r[13]);
   epever.loadPower = regsToFloat100(r[14], r[15]);
 
-  epever.batteryTemperature = regToFloat100(r[16]);
-  epever.deviceTemperature = regToFloat100(r[17]);
+  epever.batteryTemperature = signedRegToFloat100(r[16]);
+  epever.deviceTemperature = signedRegToFloat100(r[17]);
 
+  /*
+    Optional status registers.
+    Not all models respond exactly the same way, so this second read is allowed to fail.
+  */
   uint8_t statusResult = epeverNode.readInputRegisters(0x3200, 3);
   if (statusResult == epeverNode.ku8MBSuccess) {
     epever.rawBatteryStatus = epeverNode.getResponseBuffer(0);
@@ -178,6 +249,8 @@ bool epeverPollNow() {
 void epeverLoop(uint32_t intervalMs) {
   if (!epever.enabled) return;
 
+  if (intervalMs < 500) intervalMs = 500;
+
   uint32_t now = millis();
   if (now - epever.lastPollMs >= intervalMs) {
     epeverPollNow();
@@ -191,12 +264,16 @@ bool epeverIsOnline() {
   return true;
 }
 
+// ======================================================
+// Status / JSON
+// ======================================================
+
 String epeverJson(bool pretty) {
   String nl = pretty ? "\n" : "";
   String sp = pretty ? "  " : "";
 
   String j;
-  j.reserve(2400);
+  j.reserve(2600);
 
   j += "{" + nl;
   j += sp + "\"protocol\":\"epever_rs485_modbus\"," + nl;
@@ -231,6 +308,7 @@ String epeverJson(bool pretty) {
   j += sp + "\"rawBatteryStatus\":" + String(epever.rawBatteryStatus) + "," + nl;
   j += sp + "\"rawChargingStatus\":" + String(epever.rawChargingStatus) + "," + nl;
   j += sp + "\"rawDischargingStatus\":" + String(epever.rawDischargingStatus) + "," + nl;
+  j += sp + "\"lastPollMs\":" + String(epever.lastPollMs) + "," + nl;
   j += sp + "\"lastOkMs\":" + String(epever.lastOkMs) + "," + nl;
   j += sp + "\"errorCount\":" + String(epever.errorCount) + "," + nl;
   j += sp + "\"lastError\":\"" + epever.lastError + "\"" + nl;
@@ -242,7 +320,7 @@ String epeverJson(bool pretty) {
 String epeverStatusText() {
   String out;
 
-  out += "EPEVER RS485 Modbus\n";
+  out += "EPEVER / EPsolar / Tracer RS485 Modbus\n";
   out += "Enabled: " + String(epever.enabled ? "yes" : "no") + "\n";
   out += "Online: " + String(epeverIsOnline() ? "yes" : "no") + "\n";
   out += "Slave ID: " + String(epever.slaveId) + "\n";
@@ -255,8 +333,26 @@ String epeverStatusText() {
   out += "Load: " + String(epever.loadVoltage, 2) + " V, " + String(epever.loadCurrent, 2) + " A, " + String(epever.loadPower, 2) + " W\n";
   out += "Battery temp: " + String(epever.batteryTemperature, 2) + " C\n";
   out += "Device temp: " + String(epever.deviceTemperature, 2) + " C\n";
+  out += "Raw battery status: " + String(epever.rawBatteryStatus) + "\n";
+  out += "Raw charging status: " + String(epever.rawChargingStatus) + "\n";
+  out += "Raw discharging status: " + String(epever.rawDischargingStatus) + "\n";
+  out += "Last poll ms: " + String(epever.lastPollMs) + "\n";
+  out += "Last ok ms: " + String(epever.lastOkMs) + "\n";
   out += "Error count: " + String(epever.errorCount) + "\n";
   out += "Last error: " + epever.lastError + "\n";
+
+  return out;
+}
+
+String epeverBriefStatus() {
+  String out;
+
+  out += epeverIsOnline() ? "online" : "offline";
+  out += " · PV ";
+  out += String(epever.pvPower, 1);
+  out += " W · BAT ";
+  out += String(epever.batteryVoltage, 2);
+  out += " V";
 
   return out;
 }
