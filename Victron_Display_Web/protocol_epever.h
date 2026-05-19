@@ -7,9 +7,10 @@
   EPEVER / EPsolar / Tracer RS485 Modbus RTU support
 
   Hardware required:
-  - MAX485 / SP3485 / TTL-to-RS485 module
+  - TTL-to-RS485 transceiver module, preferably SP3485 3.3V or compatible MAX485 module
   - ESP32 UART RX/TX
-  - DE/RE direction control GPIO
+  - Optional DE/RE direction GPIO
+  - If the RS485 module has automatic direction control, set DE/RE GPIO to -1 in the wizard
 
   Default ESP32-S3:
   RX GPIO 18
@@ -17,6 +18,16 @@
   DE/RE GPIO 16
   Slave ID 1
   Baudrate 115200
+
+  Default ESP32 classic:
+  RX GPIO 16
+  TX GPIO 17
+  DE/RE GPIO 4
+
+  Default CYD:
+  RX GPIO 27
+  TX GPIO 26
+  DE/RE GPIO 22
 */
 
 struct EpeverTelemetry {
@@ -68,6 +79,8 @@ void epeverBegin(
   int deRePin
 );
 
+void epeverStop();
+
 void epeverLoop(uint32_t intervalMs = 2000);
 bool epeverPollNow();
 
@@ -75,3 +88,4 @@ bool epeverIsOnline();
 
 String epeverJson(bool pretty = true);
 String epeverStatusText();
+String epeverBriefStatus();
