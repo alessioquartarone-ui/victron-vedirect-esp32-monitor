@@ -9,6 +9,10 @@
   #include "protocol_epever.h"
 #endif
 
+// Explicit forward declaration.
+// This avoids Arduino/CPP include-order problems during GitHub Actions build.
+String buildPublicWizardHtml();
+
 RemoteTunnelState tunnelState;
 
 // ======================================================
@@ -245,6 +249,7 @@ void remoteTunnelBegin() {
 
 void remoteTunnelLoop() {
   if (!remoteTunnelIsEnabled()) return;
+
   if (WiFi.status() != WL_CONNECTED) {
     tunnelState.connected = false;
     tunnelState.lastPollOk = false;
