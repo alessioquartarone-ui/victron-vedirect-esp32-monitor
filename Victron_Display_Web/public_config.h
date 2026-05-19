@@ -47,6 +47,17 @@ struct VictronPublicConfig {
   int epeverDeRePin;
   uint32_t epeverPollIntervalMs;
 
+  // Remote WebUI Tunnel settings
+  bool tunnelEnabled;
+  String tunnelServerUrl;
+  String tunnelDeviceId;
+  String tunnelDeviceToken;
+  bool tunnelReadOnly;
+  bool tunnelAllowRemoteSetup;
+  bool tunnelAllowDangerous;
+  uint32_t tunnelPollMs;
+  uint32_t tunnelMaxResponseBytes;
+
   // Runtime configurable pins
   int veDirectRxPin;
   int espBatteryAdcPin;
