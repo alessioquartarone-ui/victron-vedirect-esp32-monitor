@@ -64,6 +64,16 @@ void handlePublicSetupReset(WebServer &server) {
 }
 
 void handlePublicSetupSave(WebServer &server) {
+  // Protocol / compatibility profile
+  pubCfg.deviceProtocol = publicSafeStringArg(
+    server.arg("deviceProtocol"),
+    VIC_DEFAULT_PROTOCOL_PROFILE
+  );
+
+  pubCfg.deviceProtocolLabel = publicProtocolLabelFor(pubCfg.deviceProtocol);
+  pubCfg.deviceProtocolStatus = publicProtocolStatusFor(pubCfg.deviceProtocol);
+  pubCfg.deviceProtocolNote = publicProtocolNoteFor(pubCfg.deviceProtocol);
+
   // Runtime pins
   pubCfg.veDirectRxPin = publicSafeIntArg(
     server.arg("veDirectRxPin"),
@@ -231,7 +241,12 @@ void handlePublicSetupSave(WebServer &server) {
   html += "</head><body>";
   html += "<div class='box'>";
   html += "<h2>Setup saved</h2>";
-  html += "<p>Configuration has been saved. Some changes, such as WiFi hostname, VE.Direct pin or OTA URLs, may require a reboot.</p>";
+  html += "<p>Configuration has been saved. Some changes, such as WiFi hostname, VE.Direct pin, protocol profile or OTA URLs, may require a reboot.</p>";
+
+  if (!publicProtocolIsSupported(pubCfg.deviceProtocol)) {
+    html += "<p><b>Warning:</b> selected protocol profile is planned but not supported by this firmware yet. The current parser still supports VE.Direct-compatible data.</p>";
+  }
+
   html += "<p>Redirecting to dashboard...</p>";
   html += "<p><a href='/'>Open dashboard</a> | <a href='/setup'>Back to setup</a> | <a href='/setup-json'>View JSON</a></p>";
   html += "</div>";
@@ -246,7 +261,7 @@ void handlePublicSetupSave(WebServer &server) {
 
 String buildPublicWizardHtml() {
   String html;
-  html.reserve(24000);
+  html.reserve(27000);
 
   html += "<!doctype html><html><head>";
   html += "<meta charset='utf-8'>";
@@ -263,6 +278,7 @@ String buildPublicWizardHtml() {
   html += "main{max-width:980px;margin:0 auto;padding:18px}";
   html += ".notice{border:1px solid var(--line);background:#111827;border-radius:16px;padding:14px;margin-bottom:16px;color:var(--muted);line-height:1.45}";
   html += ".notice b{color:var(--txt)}";
+  html += ".warn{border-color:#92400e;background:#451a03;color:#fed7aa}";
   html += ".section{background:rgba(15,23,42,.96);border:1px solid var(--line);border-radius:18px;margin:16px 0;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.25)}";
   html += ".section h2{font-size:18px;margin:0;padding:15px 16px;background:#111827;border-bottom:1px solid var(--line)}";
   html += ".section .body{padding:16px}";
@@ -292,9 +308,16 @@ String buildPublicWizardHtml() {
   html += "<main>";
 
   html += "<div class='notice'>";
-  html += "<b>Public edition.</b> This wizard configures runtime settings such as VE.Direct pin, battery ADC, WiFiManager, OTA, plant data, logging and WebUI. ";
+  html += "<b>Public edition.</b> This wizard configures runtime settings such as protocol profile, VE.Direct pin, battery ADC, WiFiManager, OTA, plant data, logging and WebUI. ";
   html += "Display/touch/SPI are compile-time target settings and are not changed here.";
   html += "</div>";
+
+  if (!publicProtocolIsSupported(pubCfg.deviceProtocol)) {
+    html += "<div class='notice warn'>";
+    html += "<b>Compatibility warning.</b> The selected protocol profile is marked as planned, not supported by this firmware yet. ";
+    html += "Current working parser supports Victron VE.Direct and VE.Direct-like text data.";
+    html += "</div>";
+  }
 
   html += "<form method='POST' action='/setup-save'>";
 
@@ -309,11 +332,19 @@ String buildPublicWizardHtml() {
   hardwareBody += "<p class='help'>To use another display or touch controller, flash the matching firmware target. Runtime pin changes below do not alter TFT/touch/SPI compile-time configuration.</p>";
   html += wizardSection("Hardware target", hardwareBody);
 
+  // Protocol section
+  String protoBody;
+  protoBody += wizardProtocolSelect();
+  protoBody += "<div class='field'><label>Current protocol status</label><div class='readonly'>" + publicHtmlEscape(pubCfg.deviceProtocolLabel) + " · " + publicHtmlEscape(pubCfg.deviceProtocolStatus) + "</div></div>";
+  protoBody += "<p class='help'>" + publicHtmlEscape(pubCfg.deviceProtocolNote) + "</p>";
+  protoBody += "<p class='help'>Supported now: Victron VE.Direct and generic VE.Direct-like text. Planned profiles are visible for roadmap compatibility but require future parser/driver implementation.</p>";
+  html += wizardSection("Device / protocol profile", protoBody);
+
   // Pins
   String pinsBody;
   pinsBody += "<div class='grid'>";
-  pinsBody += wizardInputNumber("veDirectRxPin", "VE.Direct RX GPIO", String(pubCfg.veDirectRxPin), "Default for CYD public target: GPIO27. Connect Victron VE.Direct TX to this ESP32 RX pin.", "1");
-  pinsBody += wizardInputNumber("espBatteryAdcPin", "ESP battery ADC GPIO", String(pubCfg.espBatteryAdcPin), "Default for CYD public target: GPIO34. Use -1 to disable.", "1");
+  pinsBody += wizardInputNumber("veDirectRxPin", "VE.Direct / UART RX GPIO", String(pubCfg.veDirectRxPin), "For Victron VE.Direct: connect device TX to this ESP32 RX GPIO.", "1");
+  pinsBody += wizardInputNumber("espBatteryAdcPin", "ESP battery ADC GPIO", String(pubCfg.espBatteryAdcPin), "Use -1 to disable ESP battery ADC.", "1");
   pinsBody += wizardInputNumber("espBatteryMultiplier", "ESP battery voltage multiplier", String(pubCfg.espBatteryMultiplier, 3), "Voltage divider multiplier. CYD default around 2.14.", "0.001");
   pinsBody += wizardInputNumber("shutdownPin", "Shutdown / relay GPIO", String(pubCfg.shutdownPin), "Optional external shutdown/relay pin. Use -1 to disable.", "1");
   pinsBody += wizardInputNumber("statusLedPin", "Status LED GPIO", String(pubCfg.statusLedPin), "Optional status LED pin. Use -1 to disable.", "1");
@@ -412,7 +443,7 @@ String buildPublicWizardHtml() {
   html += "</form>";
 
   html += "<div class='notice'>";
-  html += "<b>Wiring default for CYD public target:</b> VE.Direct TX → ESP32 GPIO27, VE.Direct GND → ESP32 GND. ";
+  html += "<b>Wiring for VE.Direct:</b> device TX → ESP32 RX GPIO, device GND → ESP32 GND. ";
   html += "Do not power the ESP32 from VE.Direct 5V unless your hardware design explicitly supports it.";
   html += "</div>";
 
@@ -471,6 +502,46 @@ String wizardCheckbox(
   html += "</label>";
   if (help.length()) html += "<div class='help'>" + publicHtmlEscape(help) + "</div>";
   html += "</div>";
+  return html;
+}
+
+String wizardProtocolSelect() {
+  struct ProtocolOption {
+    const char *id;
+    const char *label;
+    const char *status;
+  };
+
+  ProtocolOption options[] = {
+    { VIC_PROTOCOL_VEDIRECT, "Victron VE.Direct", "supported" },
+    { VIC_PROTOCOL_GENERIC_VEDIRECT, "Generic VE.Direct text", "supported" },
+    { VIC_PROTOCOL_EPEVER_MODBUS, "Epever / Tracer RS485 Modbus", "planned" },
+    { VIC_PROTOCOL_RENOGY_RS485, "Renogy RS485", "planned" },
+    { VIC_PROTOCOL_DALY_BMS, "Daly BMS UART/RS485", "planned" },
+    { VIC_PROTOCOL_JBD_BMS, "JBD BMS UART", "planned" },
+    { VIC_PROTOCOL_JK_BMS, "JK BMS", "planned" },
+    { VIC_PROTOCOL_GENERIC_MODBUS_RTU, "Generic Modbus RTU", "planned" },
+    { VIC_PROTOCOL_GENERIC_UART_TEXT, "Generic UART text", "planned" }
+  };
+
+  String html;
+  html += "<div class='field'>";
+  html += "<label for='deviceProtocol'>Device / protocol profile</label>";
+  html += "<select id='deviceProtocol' name='deviceProtocol'>";
+
+  for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+    String id = options[i].id;
+    String selected = (pubCfg.deviceProtocol == id) ? "selected" : "";
+
+    html += "<option value='" + publicHtmlEscape(id) + "' " + selected + ">";
+    html += publicHtmlEscape(String(options[i].label) + " — " + options[i].status);
+    html += "</option>";
+  }
+
+  html += "</select>";
+  html += "<div class='help'>Only supported profiles work now. Planned profiles are roadmap entries and need future drivers/parsers.</div>";
+  html += "</div>";
+
   return html;
 }
 
