@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
+#include "protocol_profiles.h"
+
 #if __has_include("config_user.h")
   #include "config_user.h"
 #else
@@ -13,9 +15,10 @@
   Runtime public configuration.
 
   These values are loaded from ESP32 Preferences/NVS.
-  Defaults come from config_user.example.h or optional config_user.h.
+  Defaults come from config_user.example.h, hardware_profiles.h,
+  protocol_profiles.h or optional config_user.h.
 
-  The setup wizard will save user settings here.
+  The setup wizard saves user settings here.
 */
 
 struct VictronPublicConfig {
@@ -28,6 +31,12 @@ struct VictronPublicConfig {
   String hardwareProfile;
   String hardwareLabel;
   String hardwareDescription;
+
+  // Device / protocol profile
+  String deviceProtocol;
+  String deviceProtocolLabel;
+  String deviceProtocolStatus;
+  String deviceProtocolNote;
 
   // Runtime configurable pins
   int veDirectRxPin;
@@ -106,6 +115,15 @@ void resetPublicConfig();
 
 bool isFirstBootSetupRequired();
 void markPublicSetupDone(bool done);
+
+// ======================================================
+// Protocol helpers
+// ======================================================
+
+bool publicProtocolIsSupported(const String &protocolId);
+String publicProtocolLabelFor(const String &protocolId);
+String publicProtocolStatusFor(const String &protocolId);
+String publicProtocolNoteFor(const String &protocolId);
 
 // ======================================================
 // HTML helpers
