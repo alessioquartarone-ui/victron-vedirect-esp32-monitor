@@ -17,6 +17,7 @@
 */
 
 #include "hardware_profiles.h"
+#include "protocol_profiles.h"
 
 // ======================================================
 // Firmware identity by target
@@ -42,7 +43,9 @@
 // ======================================================
 // Hardware defaults
 // ======================================================
-
+#define VIC_DEFAULT_DEVICE_PROTOCOL          VIC_DEFAULT_PROTOCOL_PROFILE
+#define VIC_DEFAULT_DEVICE_PROTOCOL_LABEL    VIC_DEFAULT_PROTOCOL_LABEL
+#define VIC_DEFAULT_DEVICE_PROTOCOL_STATUS   VIC_DEFAULT_PROTOCOL_STATUS
 #define VIC_DEFAULT_HARDWARE_PROFILE          VIC_TARGET_NAME
 #define VIC_DEFAULT_HARDWARE_LABEL            VIC_TARGET_LABEL
 #define VIC_DEFAULT_HARDWARE_DESCRIPTION      VIC_TARGET_DESCRIPTION
