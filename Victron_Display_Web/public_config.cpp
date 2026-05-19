@@ -3,6 +3,10 @@
 VictronPublicConfig pubCfg;
 static Preferences vicPrefs;
 
+// ======================================================
+// Internal Preferences helpers
+// ======================================================
+
 static String prefGetString(const char *key, const String &fallback) {
   return vicPrefs.getString(key, fallback);
 }
@@ -37,6 +41,7 @@ bool publicProtocolIsSupported(const String &protocolId) {
   if (protocolId == VIC_PROTOCOL_JK_BMS) return VIC_SUPPORTS_JK_BMS;
   if (protocolId == VIC_PROTOCOL_GENERIC_MODBUS_RTU) return VIC_SUPPORTS_GENERIC_MODBUS_RTU;
   if (protocolId == VIC_PROTOCOL_GENERIC_UART_TEXT) return VIC_SUPPORTS_GENERIC_UART_TEXT;
+
   return false;
 }
 
@@ -50,6 +55,7 @@ String publicProtocolLabelFor(const String &protocolId) {
   if (protocolId == VIC_PROTOCOL_JK_BMS) return "JK BMS";
   if (protocolId == VIC_PROTOCOL_GENERIC_MODBUS_RTU) return "Generic Modbus RTU";
   if (protocolId == VIC_PROTOCOL_GENERIC_UART_TEXT) return "Generic UART text";
+
   return "Unknown protocol";
 }
 
@@ -98,6 +104,27 @@ void applyPublicDefaults() {
   pubCfg.deviceProtocolLabel = VIC_DEFAULT_PROTOCOL_LABEL;
   pubCfg.deviceProtocolStatus = VIC_DEFAULT_PROTOCOL_STATUS;
   pubCfg.deviceProtocolNote = VIC_COMPAT_NOTE_VEDIRECT;
+
+  // EPEVER defaults
+  pubCfg.epeverEnabled = false;
+  pubCfg.epeverSlaveId = 1;
+  pubCfg.epeverBaudrate = 115200;
+
+#if defined(VIC_TARGET_CYD_ILI9341)
+  pubCfg.epeverRxPin = 27;
+  pubCfg.epeverTxPin = 26;
+  pubCfg.epeverDeRePin = 22;
+#elif defined(VIC_TARGET_ESP32_HEADLESS)
+  pubCfg.epeverRxPin = 16;
+  pubCfg.epeverTxPin = 17;
+  pubCfg.epeverDeRePin = 4;
+#else
+  pubCfg.epeverRxPin = 18;
+  pubCfg.epeverTxPin = 17;
+  pubCfg.epeverDeRePin = 16;
+#endif
+
+  pubCfg.epeverPollIntervalMs = 2000;
 
   pubCfg.veDirectRxPin = VIC_USER_DEFAULT_VEDIRECT_RX_PIN;
   pubCfg.espBatteryAdcPin = VIC_USER_DEFAULT_ESP_BAT_ADC_PIN;
@@ -171,6 +198,14 @@ void loadPublicConfig() {
 
   pubCfg.deviceProtocol = prefGetString("devProto", pubCfg.deviceProtocol);
 
+  pubCfg.epeverEnabled = prefGetBool("epEn", pubCfg.epeverEnabled);
+  pubCfg.epeverSlaveId = (uint8_t)prefGetInt("epSlave", pubCfg.epeverSlaveId);
+  pubCfg.epeverBaudrate = prefGetUInt("epBaud", pubCfg.epeverBaudrate);
+  pubCfg.epeverRxPin = prefGetInt("epRx", pubCfg.epeverRxPin);
+  pubCfg.epeverTxPin = prefGetInt("epTx", pubCfg.epeverTxPin);
+  pubCfg.epeverDeRePin = prefGetInt("epDeRe", pubCfg.epeverDeRePin);
+  pubCfg.epeverPollIntervalMs = prefGetUInt("epPoll", pubCfg.epeverPollIntervalMs);
+
   pubCfg.veDirectRxPin = prefGetInt("vedRx", pubCfg.veDirectRxPin);
   pubCfg.espBatteryAdcPin = prefGetInt("espAdc", pubCfg.espBatteryAdcPin);
   pubCfg.espBatteryMultiplier = prefGetFloat("espMult", pubCfg.espBatteryMultiplier);
@@ -227,9 +262,18 @@ void loadPublicConfig() {
 
   vicPrefs.end();
 
+  // Derived protocol fields
   pubCfg.deviceProtocolLabel = publicProtocolLabelFor(pubCfg.deviceProtocol);
   pubCfg.deviceProtocolStatus = publicProtocolStatusFor(pubCfg.deviceProtocol);
   pubCfg.deviceProtocolNote = publicProtocolNoteFor(pubCfg.deviceProtocol);
+
+  // Safety clamps
+  pubCfg.epeverSlaveId = (uint8_t)publicClampInt(pubCfg.epeverSlaveId, 1, 247);
+  pubCfg.epeverBaudrate = publicSafeUIntArg(String(pubCfg.epeverBaudrate), 115200, 1200, 921600);
+  pubCfg.epeverRxPin = publicClampInt(pubCfg.epeverRxPin, -1, 48);
+  pubCfg.epeverTxPin = publicClampInt(pubCfg.epeverTxPin, -1, 48);
+  pubCfg.epeverDeRePin = publicClampInt(pubCfg.epeverDeRePin, -1, 48);
+  pubCfg.epeverPollIntervalMs = publicSafeUIntArg(String(pubCfg.epeverPollIntervalMs), 2000, 500, 60000);
 
   pubCfg.veDirectRxPin = publicClampInt(pubCfg.veDirectRxPin, -1, 48);
   pubCfg.espBatteryAdcPin = publicClampInt(pubCfg.espBatteryAdcPin, -1, 48);
@@ -271,6 +315,14 @@ void savePublicConfig() {
   vicPrefs.putString("devProtoLbl", pubCfg.deviceProtocolLabel);
   vicPrefs.putString("devProtoSt", pubCfg.deviceProtocolStatus);
   vicPrefs.putString("devProtoNt", pubCfg.deviceProtocolNote);
+
+  vicPrefs.putBool("epEn", pubCfg.epeverEnabled);
+  vicPrefs.putInt("epSlave", pubCfg.epeverSlaveId);
+  vicPrefs.putUInt("epBaud", pubCfg.epeverBaudrate);
+  vicPrefs.putInt("epRx", pubCfg.epeverRxPin);
+  vicPrefs.putInt("epTx", pubCfg.epeverTxPin);
+  vicPrefs.putInt("epDeRe", pubCfg.epeverDeRePin);
+  vicPrefs.putUInt("epPoll", pubCfg.epeverPollIntervalMs);
 
   vicPrefs.putInt("vedRx", pubCfg.veDirectRxPin);
   vicPrefs.putInt("espAdc", pubCfg.espBatteryAdcPin);
@@ -337,6 +389,7 @@ void resetPublicConfig() {
   vicPrefs.begin("vicpub", false);
   vicPrefs.clear();
   vicPrefs.end();
+
   applyPublicDefaults();
 }
 
@@ -392,18 +445,22 @@ float publicClampFloat(float value, float minValue, float maxValue) {
 String publicSafeStringArg(const String &value, const String &fallback) {
   String v = value;
   v.trim();
+
   if (v.length() == 0) return fallback;
   if (v.length() > 256) v = v.substring(0, 256);
+
   return v;
 }
 
 int publicSafeIntArg(const String &value, int fallback, int minValue, int maxValue) {
   String v = value;
   v.trim();
+
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   long parsed = strtol(v.c_str(), &endPtr, 10);
+
   if (endPtr == v.c_str()) return fallback;
 
   return publicClampInt((int)parsed, minValue, maxValue);
@@ -412,10 +469,12 @@ int publicSafeIntArg(const String &value, int fallback, int minValue, int maxVal
 uint32_t publicSafeUIntArg(const String &value, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
   String v = value;
   v.trim();
+
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   unsigned long parsed = strtoul(v.c_str(), &endPtr, 10);
+
   if (endPtr == v.c_str()) return fallback;
 
   if (parsed < minValue) return minValue;
@@ -427,10 +486,12 @@ uint32_t publicSafeUIntArg(const String &value, uint32_t fallback, uint32_t minV
 float publicSafeFloatArg(const String &value, float fallback, float minValue, float maxValue) {
   String v = value;
   v.trim();
+
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   float parsed = strtof(v.c_str(), &endPtr);
+
   if (endPtr == v.c_str()) return fallback;
   if (isnan(parsed) || isinf(parsed)) return fallback;
 
@@ -442,8 +503,17 @@ bool publicSafeBoolArg(const String &value, bool fallback) {
   v.trim();
   v.toLowerCase();
 
-  if (v == "1" || v == "true" || v == "on" || v == "yes" || v == "enabled") return true;
-  if (v == "0" || v == "false" || v == "off" || v == "no" || v == "disabled") return false;
+  if (v == "1") return true;
+  if (v == "true") return true;
+  if (v == "on") return true;
+  if (v == "yes") return true;
+  if (v == "enabled") return true;
+
+  if (v == "0") return false;
+  if (v == "false") return false;
+  if (v == "off") return false;
+  if (v == "no") return false;
+  if (v == "disabled") return false;
 
   return fallback;
 }
@@ -457,9 +527,10 @@ String publicConfigToJson(bool pretty) {
   String sp = pretty ? "  " : "";
 
   String json;
-  json.reserve(5200);
+  json.reserve(6400);
 
   json += "{" + nl;
+
   json += sp + "\"firmwareName\":\"" + publicHtmlEscape(pubCfg.firmwareName) + "\"," + nl;
   json += sp + "\"firmwareVersion\":\"" + publicHtmlEscape(pubCfg.firmwareVersion) + "\"," + nl;
   json += sp + "\"hardwareProfile\":\"" + publicHtmlEscape(pubCfg.hardwareProfile) + "\"," + nl;
@@ -469,6 +540,16 @@ String publicConfigToJson(bool pretty) {
   json += sp + "\"deviceProtocolLabel\":\"" + publicHtmlEscape(pubCfg.deviceProtocolLabel) + "\"," + nl;
   json += sp + "\"deviceProtocolStatus\":\"" + publicHtmlEscape(pubCfg.deviceProtocolStatus) + "\"," + nl;
   json += sp + "\"deviceProtocolNote\":\"" + publicHtmlEscape(pubCfg.deviceProtocolNote) + "\"," + nl;
+
+  json += sp + "\"epever\":{" + nl;
+  json += sp + sp + "\"enabled\":" + String(pubCfg.epeverEnabled ? "true" : "false") + "," + nl;
+  json += sp + sp + "\"slaveId\":" + String(pubCfg.epeverSlaveId) + "," + nl;
+  json += sp + sp + "\"baudrate\":" + String(pubCfg.epeverBaudrate) + "," + nl;
+  json += sp + sp + "\"rxPin\":" + String(pubCfg.epeverRxPin) + "," + nl;
+  json += sp + sp + "\"txPin\":" + String(pubCfg.epeverTxPin) + "," + nl;
+  json += sp + sp + "\"deRePin\":" + String(pubCfg.epeverDeRePin) + "," + nl;
+  json += sp + sp + "\"pollIntervalMs\":" + String(pubCfg.epeverPollIntervalMs) + nl;
+  json += sp + "}," + nl;
 
   json += sp + "\"setupDone\":" + String(pubCfg.setupDone ? "true" : "false") + "," + nl;
 
@@ -503,6 +584,7 @@ String publicConfigToJson(bool pretty) {
 
   json += sp + "\"shutdownEnabled\":" + String(pubCfg.shutdownEnabled ? "true" : "false") + "," + nl;
   json += sp + "\"shutdownTimerSec\":" + String(pubCfg.shutdownTimerSec) + nl;
+
   json += "}" + nl;
 
   return json;
@@ -514,6 +596,8 @@ String publicConfigSummaryText() {
   out += "Firmware: " + pubCfg.firmwareName + " " + pubCfg.firmwareVersion + "\n";
   out += "Target: " + pubCfg.hardwareProfile + "\n";
   out += "Protocol: " + pubCfg.deviceProtocolLabel + " (" + pubCfg.deviceProtocolStatus + ")\n";
+  out += "EPEVER: " + String(pubCfg.epeverEnabled ? "enabled" : "disabled") + "\n";
+  out += "EPEVER RX/TX/DE: " + String(pubCfg.epeverRxPin) + "/" + String(pubCfg.epeverTxPin) + "/" + String(pubCfg.epeverDeRePin) + "\n";
   out += "VE.Direct RX GPIO: " + String(pubCfg.veDirectRxPin) + "\n";
   out += "ESP Battery ADC GPIO: " + String(pubCfg.espBatteryAdcPin) + "\n";
   out += "Hostname: " + pubCfg.hostname + "\n";
