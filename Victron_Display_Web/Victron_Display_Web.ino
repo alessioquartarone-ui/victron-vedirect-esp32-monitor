@@ -1,5 +1,5 @@
 /*
-  Victron VE.Direct ESP32 Monitor V10.5.0 CYD PUBLIC WIZARD
+  Victron VE.Direct ESP32 Monitor V10.5.2 CYD PUBLIC WIZARD
   - WiFi già inserito
   - Display TFT_eSPI - CYD ILI9341 HSPI official pinout
   - Touch XPT2046
@@ -22,9 +22,12 @@
   - V10.4.79: protezione storico da valori fuori scala/corrotti, popup con valori sanificati
   - V10.4.80: limiti hard per storico 7d/12h/31d, reset automatico slot giornalieri corrotti
   - V10.4.81: badge stato coerenti, auto check GitHub all apertura, popup esito OTA con data/ora, JSON pretty globale
+  - V10.4.85: Battery Health Pro, analisi scarica post-Float e curva tensione batteria impianto
+  - V10.4.86: fix min/max batteria storico, LiPo collegata, stati italiani, shutdown personalizzato
+  - V10.4.87: night power saver, avvisi batteria 12V e deep sleep opzionale
   - V10.4.82: grafico live pannello scalato da dati impianto, legenda/valori live, popup storico piu ordinati, quick-check
   - V10.4.83: fix layout popup storico, grafici GX con scale chiare, no-data pulito e padding iPhone
-  - V10.5.0: public-ready wizard, no private hardcoded WiFi, OTA public configurable, VE.Direct runtime pin default IO27
+  - V10.5.2: public-ready wizard based on V10.4.93 charge-state history fix, no private hardcoded WiFi, configurable OTA, runtime VE.Direct pin default IO27
 */
 
 #include <Arduino.h>
@@ -62,21 +65,36 @@
 const char* WIFI_SSID = "";  // Public build: no hardcoded WiFi SSID
 const char* WIFI_PASS = "";  // Public build: no hardcoded WiFi password
 const char* HOSTNAME  = "victron-esp32-monitor";
-const char* FW_VERSION = "V10.5.0-CYD-PUBLIC-WIZARD";
+const char* FW_VERSION = "V10.5.2-CYD-PUBLIC-WIZARD";
 const char* FW_BUILD_DATE = __DATE__;
 const char* FW_BUILD_TIME = __TIME__;
 
 // Modalità configurazione Wi-Fi pubblica.
- // Nessun SSID/password privato hardcoded.
- // Se non trova credenziali WiFi salvate, crea AP: Victron-ESP32-Setup / 12345678
+// Nessun SSID/password privato hardcoded.
+// Se non trova credenziali WiFi salvate, crea AP: Victron-ESP32-Setup / 12345678
 const char* WIFI_SETUP_AP = "Victron-ESP32-Setup";
 const char* WIFI_SETUP_PASS = "12345678";
 bool forceWifiPortalAtBoot = false;
+
+// Recovery AP Pro: modalita' di emergenza indipendente dal router.
+// Se il WiFi normale non funziona o se si forza Recovery Mode, la CYD apre anche
+// una rete propria con IP fisso 192.168.4.1.
+bool recoveryApActive = false;
+String recoveryApReason = "";
+IPAddress recoveryApIP(192, 168, 4, 1);
+IPAddress recoveryApGateway(192, 168, 4, 1);
+IPAddress recoveryApSubnet(255, 255, 255, 0);
 
 const char* FW_NAME = "Victron VE.Direct ESP32 Monitor Public Wizard";
 
 const char* WEB_USER = "admin";
 const char* WEB_PASS = "admin";
+
+// WebUI Auth Pro: credenziali configurabili salvate in Preferences.
+// Default conservativo: protezione attiva con admin/victron, modificabile da /webui-auth.
+bool webAuthEnabled = true;
+String webAuthUser = "admin";
+String webAuthPass = "admin";
 
 // IP fisso: se vuoi cambiarlo, cambia qui.
 IPAddress local_IP(0, 0, 0, 0);
@@ -131,6 +149,9 @@ String githubRemoteVersion = "N/D";
 bool githubUpdateAvailable = false;
 String rollbackStatus = "N/D";
 
+
+extern Preferences prefs;
+
 String runtimeHostname() {
   String h = pubCfg.hostname;
   h.trim();
@@ -153,8 +174,8 @@ String runtimeSetupApPass() {
 }
 
 // Bridge the public wizard settings to the legacy V10.4.x preference keys used
-// by the existing dashboard/OTA/history pages. This keeps the old stable code
-// intact while making the public first-boot wizard useful for the full firmware.
+// by the existing dashboard/OTA/history pages. This keeps the stable private
+// code intact while making the public first-boot wizard useful for the full firmware.
 void applyPublicConfigToLegacyPrefs() {
   prefs.begin("victron", false);
 
@@ -179,7 +200,6 @@ void applyPublicConfigToLegacyPrefs() {
 
   prefs.end();
 }
-
 
 // GitHub OTA progress reale: il download/update gira in background e la pagina web interroga /github-progress.
 volatile bool githubOtaRunning = false;
@@ -210,6 +230,7 @@ void setBackupProgress(int pct, const String& stage) {
 // Prototipi manuali necessari per Arduino CLI/core 2.x
 void robustTftInit();
 void drawDashboard();
+void drawBootProgress(const String& msg, int pct);
 
 // Stato OTA upload/restart condiviso anche con GitHub direct OTA
 bool uploadAllowed = true;
@@ -268,8 +289,13 @@ String httpGetString(const String& url, int timeoutMs);
 String sha256HexOfStream(Stream& stream, int len, size_t* writtenOut, bool writeToUpdate);
 void handleRecoveryPage();
 void handleRebootRecovery();
+void startRecoveryAp(const String& reason);
+void stopRecoveryAp();
+void handleRecoveryApJson();
+void handleRecoveryApStart();
 String card(String title, String value, String extra);
 String htmlHeader(String title);
+String csvEscape(String v);
 String urlEncode(const String& in);
 String getGithubVersionUrl();
 String getGithubBinUrl();
@@ -309,6 +335,11 @@ void handleBatteryPage();
 void handleBatteryJson();
 void handleBatScanPage();
 void handleVictronDataPage();
+void handleBatteryHealthPage();
+void handleBatteryHealthJson();
+void batteryHealthLoop();
+void batteryHealthLoad();
+void batteryHealthSave();
 void addVedirectRawLine(const String& line);
 void restartVictronSerial(const String& reason);
 void victronAutoRecoveryLoop();
@@ -388,10 +419,27 @@ float lastNDaysWh(int days);
 void handlePowerPage();
 void handleNetworkPage();
 void handleNetworkJson();
+void handleWifiManagerProPage();
+void handleWifiManagerProSave();
+void handleWifiManagerProJson();
+void handleWifiManagerProClear();
+void handleWifiPortalStart();
+String wifiConfiguredSsid();
+String wifiConfiguredPass();
+bool wifiCustomEnabled();
+bool connectConfiguredWiFi(unsigned long timeoutMs);
 void handleShutdownPage();
 void handleShutdownTimed();
 void handleShutdownReset();
 void enterSoftwareShutdown(uint32_t sleepMinutes, bool wakeByTimer, const String& reason);
+void handleNightPowerSaverPage();
+void handleNightPowerSaverSave();
+void handleNightPowerSaverJson();
+void nightPowerSaverLoop();
+float nightSaverThresholdV();
+String nightSaverWakeTime();
+uint32_t minutesUntilWakeTime(const String& wake);
+String lowBattery12StatusText(float v);
 void handleSdMaintenancePage();
 void handlePlantInfoPage();
 void handlePlantInfoSave();
@@ -498,8 +546,35 @@ bool sdWriteProtectEnabled = false;
 
 float battV = NAN, battA = NAN, battW = NAN;
 float panelV = NAN, panelW = NAN;
+float loadCurrentA = NAN;
+String loadState = "N/D";
+
+// V10.4.85 Battery Health Pro - analisi scarica dopo Float/Mantenimento
+const int BH_SAMPLE_COUNT = 7;
+const unsigned long BH_SAMPLE_MINUTES[BH_SAMPLE_COUNT] = {0, 5, 15, 30, 60, 120, 240};
+float bhSamples[BH_SAMPLE_COUNT] = {NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+bool bhSessionActive = false;
+bool bhSawStableFloat = false;
+unsigned long bhFloatStableSinceMs = 0;
+unsigned long bhSessionStartMs = 0;
+unsigned long bhLastLoopMs = 0;
+int bhNextSampleIndex = 0;
+float bhStartV = NAN;
+float bhMinV = NAN;
+float bhLastFloatV = NAN;
+String bhLastFloatTime = "N/D";
+String bhSessionStartTime = "N/D";
+String bhLastCompletedTime = "N/D";
+String bhLastVerdict = "Dati insufficienti";
+String bhLastReason = "Attendere un ciclo Float -> scarica.";
+float bhLastDrop1h = NAN;
+float bhLastDrop4h = NAN;
+uint32_t bhCompletedCycles = 0;
+String bhPreviousChargeState = "N/D";
+
 float yieldTodayKWh = NAN, yieldYesterdayKWh = NAN, yieldTotalKWh = NAN;
 float maxPowerToday = NAN, maxPowerYesterday = NAN;
+int victronHistoryDaySequence = -1;
 
 String chargeState = "N/D";
 String mpptState = "N/D";
@@ -631,9 +706,37 @@ float slotAvgPanel(const HistorySlot& s);
 float slotAvgBatt(const HistorySlot& s);
 bool loadChargeHistoryFromFs();
 void saveChargeHistoryToFs();
+uint32_t chargeSlotTotal(const ChargeStateSlot &s);
+void sanitizeChargeSlotWithLimit(ChargeStateSlot &s, uint32_t maxSec);
+uint32_t chargeCurrentHourMaxSec();
+uint32_t chargeCurrentDayMaxSec();
+uint32_t chargeCurrentMonthMaxSec();
+void sanitizeAllChargeHistorySlots();
+void chargeHistoryCalendarGuard();
 float slotAvgPanel(const HistorySlot& s);
 float slotAvgBatt(const HistorySlot& s);
 float slotBattMin(const HistorySlot& s);
+float configuredSystemVoltage();
+bool historyBatteryVoltageOk(float v);
+String chargeStateItalianLabel(const String& s);
+String mpptStateItalianLabel(const String& s);
+String batteryHealthVerdictItalian(const String& s);
+String loadStateItalianLabel();
+float loadPowerWatts();
+String vedirectBatteryLevelLabel();
+String vedirectCommsQualityLabel();
+float vedirectBadLinePercent();
+String vedirectDecodedHtml();
+String vedirectDecodedJson();
+void handleLoadMonitorPage();
+void handleLoadMonitorJson();
+void loadWebAuthSettings();
+void saveWebAuthSettings(bool enabled, const String& user, const String& pass);
+String webAuthStatusJson();
+void handleWebAuthPage();
+void handleWebAuthSave();
+void handleWebAuthReset();
+void handleWebAuthJson();
 
 int currentHourIndex = -1;
 int currentDayIndex = -1;
@@ -642,10 +745,64 @@ int currentMonthIndex = -1;
 unsigned long lastHistoryMs = 0;
 float lastPanelWForEnergy = NAN;
 
+// V10.4.93 - Guardia calendario per storico stati carica.
+// Evita che Bulk/Assorbimento/Mantenimento/Spento accumulino piu' giorni
+// nello stesso slot dopo OTA/reboot, senza toccare lo storico produzione.
+unsigned long lastChargeCalendarGuardMs = 0;
+
+
+String cleanCredentialText(String v, int maxLen) {
+  v.trim();
+  v.replace("\r", "");
+  v.replace("\n", "");
+  v.replace("\t", "");
+  if (v.length() > maxLen) v = v.substring(0, maxLen);
+  return v;
+}
+
+bool validWebUser(const String& u) {
+  if (u.length() < 3 || u.length() > 24) return false;
+  for (size_t i = 0; i < u.length(); i++) {
+    char c = u[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+bool validWebPass(const String& p) {
+  return p.length() >= 6 && p.length() <= 64;
+}
+
+void loadWebAuthSettings() {
+  prefs.begin("victron", true);
+  webAuthEnabled = prefs.getBool("web_auth_en", true);
+  webAuthUser = prefs.getString("web_auth_user", WEB_USER);
+  webAuthPass = prefs.getString("web_auth_pass", WEB_PASS);
+  prefs.end();
+  webAuthUser = cleanCredentialText(webAuthUser, 24);
+  webAuthPass = cleanCredentialText(webAuthPass, 64);
+  if (!validWebUser(webAuthUser)) webAuthUser = WEB_USER;
+  if (!validWebPass(webAuthPass)) webAuthPass = WEB_PASS;
+}
+
+void saveWebAuthSettings(bool enabled, const String& user, const String& pass) {
+  webAuthEnabled = enabled;
+  webAuthUser = cleanCredentialText(user, 24);
+  webAuthPass = cleanCredentialText(pass, 64);
+  if (!validWebUser(webAuthUser)) webAuthUser = WEB_USER;
+  if (!validWebPass(webAuthPass)) webAuthPass = WEB_PASS;
+  prefs.begin("victron", false);
+  prefs.putBool("web_auth_en", webAuthEnabled);
+  prefs.putString("web_auth_user", webAuthUser);
+  prefs.putString("web_auth_pass", webAuthPass);
+  prefs.end();
+}
 
 bool requireAuth() {
-  if (server.authenticate(WEB_USER, WEB_PASS)) return true;
-  server.requestAuthentication();
+  if (!webAuthEnabled) return true;
+  if (server.authenticate(webAuthUser.c_str(), webAuthPass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "Victron CYD WebUI");
   return false;
 }
 
@@ -824,9 +981,12 @@ void parseVictronLine(const String& line) {
   else if (key == "H21") maxPowerToday = val.toFloat();
   else if (key == "H22") yieldYesterdayKWh = val.toFloat() * 0.01;
   else if (key == "H23") maxPowerYesterday = val.toFloat();
+  else if (key == "HDS") victronHistoryDaySequence = val.toInt();
   else if (key == "CS") chargeState = csText(val.toInt());
   else if (key == "MPPT") mpptState = mpptText(val.toInt());
   else if (key == "ERR") errorState = val;
+  else if (key == "IL") loadCurrentA = val.toFloat() / 1000.0;
+  else if (key == "LOAD") loadState = val;
   else if (key == "PID") modelName = val;
   else if (key == "SER#") serialNumber = val;
   else if (key == "FW") firmwareVer = val;
@@ -2116,6 +2276,90 @@ void resetSlot(HistorySlot &s) {
   s.samples = 0;
 }
 
+const uint32_t CHARGE_MAX_HOURLY_SEC  = 3600UL;
+const uint32_t CHARGE_MAX_DAILY_SEC   = 86400UL;
+const uint32_t CHARGE_MAX_MONTHLY_SEC = 31UL * 86400UL;
+const uint32_t CHARGE_HISTORY_TIME_MARGIN_SEC = 300UL;
+
+uint32_t chargeCurrentHourMaxSec() {
+  if (!timeIsValid()) return CHARGE_MAX_HOURLY_SEC;
+  struct tm ti;
+  if (!getLocalTime(&ti, 20)) return CHARGE_MAX_HOURLY_SEC;
+  uint32_t elapsed = (uint32_t)ti.tm_min * 60UL + (uint32_t)ti.tm_sec + 60UL;
+  if (elapsed > CHARGE_MAX_HOURLY_SEC) elapsed = CHARGE_MAX_HOURLY_SEC;
+  return elapsed;
+}
+
+uint32_t chargeCurrentDayMaxSec() {
+  if (!timeIsValid()) return CHARGE_MAX_DAILY_SEC;
+  struct tm ti;
+  if (!getLocalTime(&ti, 20)) return CHARGE_MAX_DAILY_SEC;
+  uint32_t elapsed = (uint32_t)ti.tm_hour * 3600UL + (uint32_t)ti.tm_min * 60UL + (uint32_t)ti.tm_sec + CHARGE_HISTORY_TIME_MARGIN_SEC;
+  if (elapsed < 60UL) elapsed = 60UL;
+  if (elapsed > CHARGE_MAX_DAILY_SEC) elapsed = CHARGE_MAX_DAILY_SEC;
+  return elapsed;
+}
+
+uint32_t chargeCurrentMonthMaxSec() {
+  if (!timeIsValid()) return CHARGE_MAX_MONTHLY_SEC;
+  struct tm ti;
+  if (!getLocalTime(&ti, 20)) return CHARGE_MAX_MONTHLY_SEC;
+  uint32_t daySec = (uint32_t)ti.tm_hour * 3600UL + (uint32_t)ti.tm_min * 60UL + (uint32_t)ti.tm_sec;
+  int elapsedDays = ti.tm_mday - 1;
+  if (elapsedDays < 0) elapsedDays = 0;
+  uint32_t elapsed = (uint32_t)elapsedDays * 86400UL + daySec + CHARGE_HISTORY_TIME_MARGIN_SEC;
+  if (elapsed < 60UL) elapsed = 60UL;
+  if (elapsed > CHARGE_MAX_MONTHLY_SEC) elapsed = CHARGE_MAX_MONTHLY_SEC;
+  return elapsed;
+}
+
+uint32_t chargeSlotTotal(const ChargeStateSlot &s) {
+  uint64_t total = (uint64_t)s.offSec + s.bulkSec + s.absorptionSec + s.floatSec + s.storageSec + s.otherSec;
+  if (total > 0xFFFFFFFFULL) return 0xFFFFFFFFUL;
+  return (uint32_t)total;
+}
+
+static uint32_t scaledChargeField(uint32_t v, uint32_t total, uint32_t maxSec) {
+  if (total == 0 || v == 0) return 0;
+  uint64_t n = (uint64_t)v * (uint64_t)maxSec + (total / 2UL);
+  return (uint32_t)(n / total);
+}
+
+void sanitizeChargeSlotWithLimit(ChargeStateSlot &s, uint32_t maxSec) {
+  if (maxSec == 0) return;
+  uint32_t total = chargeSlotTotal(s);
+  if (total == 0) {
+    s.samples = 0;
+    return;
+  }
+
+  // Se i tempi superano il massimo fisico dello slot, non cancelliamo lo storico produzione.
+  // Ridimensioniamo solo i tempi stato carica mantenendo le proporzioni: cosi' i dati raccolti
+  // restano consultabili, ma non compaiono piu' giornate da 52 ore.
+  if (total > maxSec) {
+    s.offSec        = scaledChargeField(s.offSec,        total, maxSec);
+    s.bulkSec       = scaledChargeField(s.bulkSec,       total, maxSec);
+    s.absorptionSec = scaledChargeField(s.absorptionSec, total, maxSec);
+    s.floatSec      = scaledChargeField(s.floatSec,      total, maxSec);
+    s.storageSec    = scaledChargeField(s.storageSec,    total, maxSec);
+    s.otherSec      = scaledChargeField(s.otherSec,      total, maxSec);
+
+    // Correzione arrotondamenti: il totale finale non deve mai superare maxSec.
+    uint32_t fixedTotal = chargeSlotTotal(s);
+    while (fixedTotal > maxSec && s.otherSec > 0) { s.otherSec--; fixedTotal--; }
+    while (fixedTotal > maxSec && s.offSec > 0) { s.offSec--; fixedTotal--; }
+  }
+
+  uint32_t sampleLimit = max(1UL, maxSec / 5UL);
+  if (s.samples > sampleLimit) s.samples = (uint16_t)((sampleLimit > 65535UL) ? 65535UL : sampleLimit);
+}
+
+void sanitizeAllChargeHistorySlots() {
+  for (int i = 0; i < 24; i++) sanitizeChargeSlotWithLimit(chHourly[i], CHARGE_MAX_HOURLY_SEC);
+  for (int i = 0; i < 31; i++) sanitizeChargeSlotWithLimit(chDaily[i], CHARGE_MAX_DAILY_SEC);
+  for (int i = 0; i < 12; i++) sanitizeChargeSlotWithLimit(chMonthly[i], CHARGE_MAX_MONTHLY_SEC);
+}
+
 void resetChargeSlot(ChargeStateSlot &s) {
   s.offSec = 0;
   s.bulkSec = 0;
@@ -2145,11 +2389,11 @@ void addChargeSecondsToSlot(ChargeStateSlot &s, uint32_t seconds) {
   } else {
     s.otherSec += seconds;
   }
-  s.samples++;
+  if (s.samples < 65535) s.samples++;
 }
 
 String chargeJsonFields(const ChargeStateSlot &s) {
-  uint32_t total = s.offSec + s.bulkSec + s.absorptionSec + s.floatSec + s.storageSec + s.otherSec;
+  uint32_t total = chargeSlotTotal(s);
   String j = "";
   j += ",\"off_sec\":" + String(s.offSec);
   j += ",\"bulk_sec\":" + String(s.bulkSec);
@@ -2183,20 +2427,77 @@ bool historyValueOk(float v, float minV, float maxV) {
   return true;
 }
 
+float configuredSystemVoltage() {
+  prefs.begin("victron", true);
+  String sv = prefs.getString("plant_sys_v", "12");
+  prefs.end();
+  float v = sv.toFloat();
+  if (v != 24.0f && v != 48.0f) v = 12.0f;
+  return v;
+}
+
+bool historyBatteryVoltageOk(float v) {
+  if (isnan(v) || isinf(v)) return false;
+  float sys = configuredSystemVoltage();
+  float minV = 8.0f, maxV = 16.5f;
+  if (sys >= 47.0f) { minV = 32.0f; maxV = 66.0f; }
+  else if (sys >= 23.0f) { minV = 16.0f; maxV = 33.0f; }
+  // Protegge lo storico da valori falsi tipo 1.05 V entrati durante boot/no-data/OTA.
+  return (v >= minV && v <= maxV);
+}
+
+String chargeStateItalianLabel(const String& s) {
+  if (s == "Bulk") return "Prima fase";
+  if (s == "Absorption") return "Assorbimento";
+  if (s == "Float") return "Mantenimento";
+  if (s == "Storage") return "Stoccaggio";
+  if (s == "Equalize") return "Equalizzazione";
+  if (s == "Fault") return "Errore";
+  if (s == "Wake-up") return "Risveglio";
+  if (s == "EXT Control") return "Controllo esterno";
+  if (s == "Off") return "Spento";
+  if (s == "N/D" || s.length() == 0) return "N/D";
+  return s;
+}
+
+String mpptStateItalianLabel(const String& s) {
+  if (s == "Off") return "Spento";
+  if (s == "MPPT active" || s == "MPPT attivo") return "MPPT attivo";
+  return s;
+}
+
+String batteryHealthVerdictItalian(const String& s) {
+  if (s == "Good") return "Buona";
+  if (s == "Fair") return "Discreta";
+  if (s == "Check") return "Da controllare";
+  if (s == "Critical") return "Critica";
+  if (s == "Insufficient data") return "Dati insufficienti";
+  return s;
+}
+
 void sanitizeHistorySlotWithLimit(HistorySlot &s, float whLimit) {
   bool hardReset = false;
 
   if (!historyValueOk(s.wh, 0.0f, whLimit)) hardReset = true;
   if (!historyValueOk(s.maxW, 0.0f, HISTORY_MAX_REASONABLE_W)) hardReset = true;
   if (!historyValueOk(s.maxPanelV, 0.0f, HISTORY_MAX_REASONABLE_PV)) hardReset = true;
-  if (!historyValueOk(s.battMax, 0.0f, HISTORY_MAX_REASONABLE_BAT)) hardReset = true;
-  if (s.battMin != 999 && !historyValueOk(s.battMin, 0.0f, HISTORY_MAX_REASONABLE_BAT)) hardReset = true;
-  if (!historyValueOk(s.battSum, 0.0f, HISTORY_MAX_REASONABLE_BAT * 65535.0f)) hardReset = true;
+  // I valori batteria vanno validati in base al sistema 12/24/48 V configurato.
+  // Non azzeriamo tutto lo slot per un solo minimo falso: correggiamo solo min/max/somma.
+  bool battBad = false;
+  if (s.battMax > 0 && !historyBatteryVoltageOk(s.battMax)) battBad = true;
+  if (s.battMin != 999 && !historyBatteryVoltageOk(s.battMin)) battBad = true;
+  if (!historyValueOk(s.battSum, 0.0f, HISTORY_MAX_REASONABLE_BAT * 65535.0f)) battBad = true;
   if (!historyValueOk(s.panelSum, 0.0f, HISTORY_MAX_REASONABLE_PV * 65535.0f)) hardReset = true;
   if (!historyValueOk(s.loadWh, 0.0f, whLimit)) hardReset = true;
 
   if (hardReset) {
     resetSlot(s);
+    return;
+  }
+  if (battBad) {
+    s.battMin = 999;
+    s.battMax = 0;
+    s.battSum = 0;
   }
 }
 
@@ -2240,13 +2541,54 @@ void initHistoryIfNeeded() {
   }
 }
 
+void chargeHistoryCalendarGuard() {
+  if (!timeIsValid()) return;
+  if (millis() - lastChargeCalendarGuardMs < 30000UL) return;
+  lastChargeCalendarGuardMs = millis();
+
+  struct tm ti;
+  if (!getLocalTime(&ti, 50)) return;
+
+  char hKey[16];
+  char dKey[12];
+  char mKey[10];
+  snprintf(hKey, sizeof(hKey), "%04d%02d%02d%02d", ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour);
+  snprintf(dKey, sizeof(dKey), "%04d%02d%02d", ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+  snprintf(mKey, sizeof(mKey), "%04d%02d", ti.tm_year + 1900, ti.tm_mon + 1);
+
+  prefs.begin("chhist", false);
+  String prevH = prefs.getString("hour_key", "");
+  String prevD = prefs.getString("day_key", "");
+  String prevM = prefs.getString("month_key", "");
+
+  // Al primo avvio salviamo solo i riferimenti. Non cancelliamo dati esistenti.
+  if (prevH.length() == 0) prefs.putString("hour_key", hKey);
+  else if (prevH != String(hKey) && currentHourIndex >= 0) {
+    resetChargeSlot(chHourly[currentHourIndex]);
+    prefs.putString("hour_key", hKey);
+  }
+
+  if (prevD.length() == 0) prefs.putString("day_key", dKey);
+  else if (prevD != String(dKey) && currentDayIndex >= 0) {
+    resetChargeSlot(chDaily[currentDayIndex]);
+    prefs.putString("day_key", dKey);
+  }
+
+  if (prevM.length() == 0) prefs.putString("month_key", mKey);
+  else if (prevM != String(mKey) && currentMonthIndex >= 0) {
+    resetChargeSlot(chMonthly[currentMonthIndex]);
+    prefs.putString("month_key", mKey);
+  }
+  prefs.end();
+}
+
 void addSampleToSlot(HistorySlot &s, float wh, float pW, float bV, float pV) {
   // Sanifica i campioni prima di inserirli nello storico.
   // Serve a evitare popup/grafici impossibili tipo P max da MW o Wh enormi.
   bool whOk = historyValueOk(wh, 0.0f, 25.0f); // 25 Wh ogni 10s e' gia' enorme; protegge da dt/campioni corrotti
   bool pOk = historyValueOk(pW, 0.0f, HISTORY_MAX_REASONABLE_W);
   bool pvOk = historyValueOk(pV, 0.0f, HISTORY_MAX_REASONABLE_PV);
-  bool bOk = historyValueOk(bV, 0.0f, HISTORY_MAX_REASONABLE_BAT);
+  bool bOk = historyBatteryVoltageOk(bV);
 
   if (whOk) s.wh += wh;
   if (pOk && pW > s.maxW) s.maxW = pW;
@@ -2264,6 +2606,7 @@ void addSampleToSlot(HistorySlot &s, float wh, float pW, float bV, float pV) {
 
 void updateHistory() {
   initHistoryIfNeeded();
+  chargeHistoryCalendarGuard();
 
   unsigned long now = millis();
   if (lastHistoryMs == 0) {
@@ -2278,7 +2621,7 @@ void updateHistory() {
   float dtHours = dtMs / 3600000.0;
   uint32_t dtSec = dtMs / 1000UL;
   float p = historyValueOk(panelW, 0.0f, HISTORY_MAX_REASONABLE_W) ? panelW : 0;
-  float safeBattV = historyValueOk(battV, 0.0f, HISTORY_MAX_REASONABLE_BAT) ? battV : NAN;
+  float safeBattV = historyBatteryVoltageOk(battV) ? battV : NAN;
   float safePanelV = historyValueOk(panelV, 0.0f, HISTORY_MAX_REASONABLE_PV) ? panelV : NAN;
   float wh = p * dtHours;
 
@@ -2288,6 +2631,9 @@ void updateHistory() {
   addChargeSecondsToSlot(chHourly[currentHourIndex], dtSec);
   addChargeSecondsToSlot(chDaily[currentDayIndex], dtSec);
   addChargeSecondsToSlot(chMonthly[currentMonthIndex], dtSec);
+  sanitizeChargeSlotWithLimit(chHourly[currentHourIndex], chargeCurrentHourMaxSec());
+  sanitizeChargeSlotWithLimit(chDaily[currentDayIndex], chargeCurrentDayMaxSec());
+  sanitizeChargeSlotWithLimit(chMonthly[currentMonthIndex], chargeCurrentMonthMaxSec());
 
   lastHistoryMs = now;
   lastPanelWForEnergy = panelW;
@@ -2311,7 +2657,9 @@ String historyJsonArray(HistorySlot *arr, int count, int currentIndex, const cha
 
     float battAvg = s.samples ? s.battSum / s.samples : 0;
     float panelAvg = s.samples ? s.panelSum / s.samples : 0;
-    float battMinSafe = (s.battMin == 999) ? 0 : s.battMin;
+    float battMinSafe = (s.battMin == 999 || !historyBatteryVoltageOk(s.battMin)) ? 0 : s.battMin;
+    if (!historyBatteryVoltageOk(s.battMax)) s.battMax = 0;
+    if (!historyBatteryVoltageOk(battAvg)) battAvg = 0;
 
     if (i) out += ",";
     out += "{";
@@ -2342,9 +2690,16 @@ String historyJsonArray(HistorySlot *arr, int count, int currentIndex, const cha
     out += "\"loadwh\":" + String(s.loadWh, 2) + ",";
     out += "\"errors\":" + String(s.errors) + ",";
     out += "\"samples\":" + String(s.samples);
-    if (String(labelPrefix) == "H") out += chargeJsonFields(chHourly[idx]);
-    else if (String(labelPrefix) == "G") out += chargeJsonFields(chDaily[idx]);
-    else out += chargeJsonFields(chMonthly[idx]);
+    if (String(labelPrefix) == "H") {
+      sanitizeChargeSlotWithLimit(chHourly[idx], (idx == currentHourIndex) ? chargeCurrentHourMaxSec() : CHARGE_MAX_HOURLY_SEC);
+      out += chargeJsonFields(chHourly[idx]);
+    } else if (String(labelPrefix) == "G") {
+      sanitizeChargeSlotWithLimit(chDaily[idx], (idx == currentDayIndex) ? chargeCurrentDayMaxSec() : CHARGE_MAX_DAILY_SEC);
+      out += chargeJsonFields(chDaily[idx]);
+    } else {
+      sanitizeChargeSlotWithLimit(chMonthly[idx], (idx == currentMonthIndex) ? chargeCurrentMonthMaxSec() : CHARGE_MAX_MONTHLY_SEC);
+      out += chargeJsonFields(chMonthly[idx]);
+    }
     out += "}";
   }
   out += "]";
@@ -2415,6 +2770,7 @@ bool loadChargeHistoryFromFs() {
   f.read((uint8_t*)chDaily, sizeof(chDaily));
   f.read((uint8_t*)chMonthly, sizeof(chMonthly));
   f.close();
+  sanitizeAllChargeHistorySlots();
   return true;
 }
 
@@ -2611,7 +2967,7 @@ bool shouldMigrateOtaUrlToPublicRepo(const String& url) {
   u.trim();
   if (u.length() == 0) return true;
   if (u.indexOf("alessioquartarone-ui/victron-vedirect-esp32-monitor-ota") >= 0) return false;
-  if (u.indexOf("alessioquartarone-ui/victron-esp32-monitor-ota") >= 0) return true;
+  if (u.indexOf("alessioquartarone-ui/victron-vedirect-esp32-monitor-ota") >= 0) return true;
   if (u.indexOf("alessioquartarone-ui/victron-esp32-monitor/") >= 0) return true;
   if (u.indexOf("/victron-esp32-monitor/main/firmware/") >= 0) return true;
   return false;
@@ -2634,13 +2990,35 @@ void ensurePublicOtaRepoDefaults() {
   prefs.end();
 }
 
+bool isHexChar(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 String cleanSha256(String v) {
+  // Accetta formati diversi prodotti da GitHub Actions / sha256sum:
+  //   <64hex>
+  //   <64hex>  latest.bin
+  //   SHA256(latest.bin)= <64hex>
+  //   sha256: <64hex>
+  // e ignora newline, spazi, BOM o testo extra.
   v.trim();
-  int sp = v.indexOf(' ');
-  if (sp > 0) v = v.substring(0, sp);
-  v.trim();
-  v.toLowerCase();
-  return v;
+  if (v.length() >= 3 && (uint8_t)v[0] == 0xEF && (uint8_t)v[1] == 0xBB && (uint8_t)v[2] == 0xBF) {
+    v = v.substring(3);
+  }
+  String run = "";
+  for (uint16_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (isHexChar(c)) {
+      run += c;
+      if (run.length() == 64) {
+        run.toLowerCase();
+        return run;
+      }
+    } else {
+      run = "";
+    }
+  }
+  return "";
 }
 
 String sha256HexOfStream(Stream& stream, int len, size_t* writtenOut, bool writeToUpdate) {
@@ -2765,7 +3143,11 @@ bool performGithubBinUpdate(String& result) {
     http.end(); return false;
   }
   if (shaUrl.length() && !shaRequired) {
-    result = "SHA256 remoto non valido o non leggibile. Update bloccato per sicurezza.";
+    result = "SHA256 remoto non valido o non leggibile. Update bloccato per sicurezza. Controlla che latest.sha256 contenga un hash SHA256 da 64 caratteri esadecimali.";
+    githubOtaPercent = 0;
+    githubOtaTotal = 0;
+    githubOtaWritten = 0;
+    githubOtaMessage = result;
     http.end(); return false;
   }
   githubOtaMessage = "Fase 5/9: preparazione partizione OTA...";
@@ -3212,7 +3594,7 @@ String diagnosticsJson() {
   json += "\"firmware_build\":\"" + buildText() + "\",";
   json += "\"time\":\"" + timeText() + "\",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"hostname\":\"" + String(HOSTNAME) + "\",";
+  json += "\"hostname\":\"" + runtimeHostname() + "\",";
   json += "\"wifi_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
   json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"victron_online\":" + String(victronOnline() ? "true" : "false") + ",";
@@ -3313,6 +3695,60 @@ void weeklyGithubUpdateLoop() {
   }
 }
 
+
+void startRecoveryAp(const String& reason) {
+  if (recoveryApActive) return;
+
+  recoveryApReason = reason;
+
+  // Mantiene eventuale STA se gia' connessa, ma abilita anche AP indipendente dal router.
+  if (WiFi.status() == WL_CONNECTED) WiFi.mode(WIFI_AP_STA);
+  else WiFi.mode(WIFI_AP_STA);
+
+  WiFi.softAPConfig(recoveryApIP, recoveryApGateway, recoveryApSubnet);
+  bool ok = WiFi.softAP(runtimeSetupApSsid().c_str(), runtimeSetupApPass().c_str());
+
+  if (ok) {
+    recoveryApActive = true;
+    addEventLog("RECOVERY_AP", "AP attivo: " + runtimeSetupApSsid() + " IP 192.168.4.1 - " + reason);
+    prefs.begin("victron", false);
+    prefs.putString("recovery_ap_reason", reason);
+    prefs.putString("recovery_ap_ip", "192.168.4.1");
+    prefs.end();
+  } else {
+    addEventLog("RECOVERY_AP", "Errore avvio AP recovery: " + reason);
+  }
+}
+
+void stopRecoveryAp() {
+  if (!recoveryApActive) return;
+  WiFi.softAPdisconnect(true);
+  recoveryApActive = false;
+  recoveryApReason = "";
+  addEventLog("RECOVERY_AP", "AP recovery disattivato");
+}
+
+void handleRecoveryApJson() {
+  String j = "{";
+  j += "\n  \"recovery_ap_active\": " + String(recoveryApActive ? "true" : "false") + ",";
+  j += "\n  \"ssid\": \"" + jsonEsc(WIFI_SETUP_AP) + "\",";
+  j += "\n  \"password\": \"" + jsonEsc(WIFI_SETUP_PASS) + "\",";
+  j += "\n  \"recovery_ip\": \"192.168.4.1\",";
+  j += "\n  \"reason\": \"" + jsonEsc(recoveryApReason) + "\",";
+  j += "\n  \"sta_connected\": " + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+  j += "\n  \"sta_ip\": \"" + jsonEsc(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("0.0.0.0")) + "\",";
+  j += "\n  \"firmware\": \"" + jsonEsc(FW_VERSION) + "\"";
+  j += "\n}";
+  server.send(200, "application/json; charset=utf-8", j);
+}
+
+
+void handleRecoveryApStart() {
+  if (!requireAuth()) return;
+  startRecoveryAp("Avvio manuale da WebUI");
+  sendActionPage("Recovery AP", "Recovery AP attivo. Collegati alla rete setup/recovery e apri http://192.168.4.1/recovery se l'IP normale non risponde.", 5, "/recovery");
+}
+
 void handleRecoveryPage() {
   if (!requireAuth()) return;
 
@@ -3355,6 +3791,7 @@ void handleRecoveryPage() {
 
   html += "<div class='grid'>";
   html += card("Recovery mode", rec ? "ATTIVA" : "NON ATTIVA", "Forzata: " + String(forced ? "SI" : "NO") + "<br>Automatica consigliata: " + String(recommended ? "SI" : "NO"));
+  html += card("Recovery AP", recoveryApActive ? "ATTIVO" : "Pronto", "SSID: <b>" + runtimeSetupApSsid() + "</b><br>Password: <b>" + runtimeSetupApPass() + "</b><br>IP fisso: <b>192.168.4.1</b><br>Motivo: " + esc(recoveryApReason));
   html += card("Boot non confermati", String(unconf) + " / " + String(SAFE_BOOT_MAX_UNCONFIRMED), "Conferma stabile dopo " + String(SAFE_BOOT_CONFIRM_MS / 1000UL) + " secondi con WiFi OK");
   html += card("Firmware stabile", esc(stableFw), "Ultima conferma: " + esc(stableTime));
   html += card("Backup pre-OTA", esc(lastPre), "SD: " + String(sdMounted ? "montata" : "non montata"));
@@ -3364,7 +3801,13 @@ void handleRecoveryPage() {
   html += "<p><b>Safe boot:</b> " + esc(safe) + "</p>";
   html += "<p><b>Rollback:</b> " + esc(rollbackStatus) + "</p>";
   html += "<p><b>Motivo recovery:</b> " + esc(reason) + "</p>";
-  html += "<p><a class='button' href='/recovery?clear=1'>Cancella recovery flag</a><a class='button' href='/recovery?force=1'>Forza recovery flag</a><a class='button' href='/reboot-recovery' onclick=\"return confirm('Riavviare ora in Recovery Mode?')\">Riavvia ora in Recovery</a></p>";
+  html += "<p><a class='button' href='/recovery?clear=1'>Cancella recovery flag</a><a class='button' href='/recovery?force=1'>Forza recovery flag</a><a class='button' href='/recovery-ap-start'>Avvia Recovery AP ora</a><a class='button' href='/reboot-recovery' onclick=\"return confirm('Riavviare ora in Recovery Mode?')\">Riavvia ora in Recovery</a></p>";
+  html += "</div>";
+
+  html += "<div class='card'><div class='t'>Recovery indipendente dal router</div>";
+  html += "<p>Se l'IP normale non funziona, collega il telefono alla rete <b>" + runtimeSetupApSsid() + "</b>, password <b>" + runtimeSetupApPass() + "</b>, poi apri <b>http://192.168.4.1/recovery</b>.</p>";
+  html += "<p>Questa modalita' serve per cambiare WiFi, caricare un firmware .bin, ripristinare da SD o riavviare senza dipendere dal router.</p>";
+  html += "<p><a class='button' href='/recovery-ap.json'>Stato Recovery AP JSON</a><a class='button' href='/wifi'>WiFi Manager Pro</a></p>";
   html += "</div>";
 
   html += "<div class='card'><div class='t'>Funzioni disponibili</div>";
@@ -3469,6 +3912,100 @@ String card(String title, String value, String extra = "") {
   return s;
 }
 
+String maskedPasswordHint() {
+  if (!validWebPass(webAuthPass)) return "non impostata";
+  String m = "";
+  int n = webAuthPass.length();
+  if (n > 12) n = 12;
+  for (int i = 0; i < n; i++) m += "*";
+  return m;
+}
+
+String webAuthStatusJson() {
+  String j = "{";
+  j += "\"enabled\":" + String(webAuthEnabled ? "true" : "false") + ",";
+  j += "\"username\":\"" + jsonEsc(webAuthUser) + "\",";
+  j += "\"password_set\":" + String(validWebPass(webAuthPass) ? "true" : "false") + ",";
+  j += "\"password_length\":" + String(webAuthPass.length()) + ",";
+  j += "\"recovery_ap_active\":" + String(recoveryApActive ? "true" : "false") + ",";
+  j += "\"note\":\"password never exposed\"";
+  j += "}";
+  return j;
+}
+
+void handleWebAuthJson() {
+  if (!requireAuth()) return;
+  sendJsonPretty(webAuthStatusJson());
+}
+
+void handleWebAuthPage() {
+  if (!requireAuth()) return;
+  loadWebAuthSettings();
+  String html = htmlHeader("Sicurezza WebUI");
+  html += "<h1>Sicurezza WebUI</h1><p><a href='/settings'>Impostazioni</a> &middot; <a href='/updates'>Aggiornamenti</a> &middot; <a href='/recovery'>Recovery</a> &middot; <a href='/'>Dashboard</a></p>";
+  html += "<div class='card'><div class='t'>Stato protezione</div><div class='v'>" + String(webAuthEnabled ? "LOGIN ATTIVO" : "LOGIN DISATTIVATO") + "</div>";
+  html += "<div class='e'><b>Utente attuale:</b> " + esc(webAuthUser) + "<br><b>Password:</b> " + maskedPasswordHint() + "<br>La password non viene mostrata in JSON, log o diagnostica.</div></div>";
+
+  html += "<div class='card'><div class='t'>Modifica accesso WebUI</div>";
+  html += "<form method='post' action='/webui-auth-save' autocomplete='off'>";
+  html += "<p><label><input type='checkbox' name='enabled' value='1' " + String(webAuthEnabled ? "checked" : "") + "> Protezione login attiva</label></p>";
+  html += "<p>Nome utente<br><input name='user' value='" + esc(webAuthUser) + "' maxlength='24' autocapitalize='none' autocomplete='username' style='width:100%;font-size:18px;padding:12px;border-radius:12px;border:1px solid #334;background:#0b1220;color:#e6edf3'></p>";
+  html += "<p>Nuova password<br><input id='p1' name='pass1' type='password' maxlength='64' autocomplete='new-password' placeholder='minimo 6 caratteri' style='width:100%;font-size:18px;padding:12px;border-radius:12px;border:1px solid #334;background:#0b1220;color:#e6edf3'></p>";
+  html += "<p>Conferma password<br><input id='p2' name='pass2' type='password' maxlength='64' autocomplete='new-password' placeholder='ripeti password' style='width:100%;font-size:18px;padding:12px;border-radius:12px;border:1px solid #334;background:#0b1220;color:#e6edf3'></p>";
+  html += "<p><button class='button' type='button' onclick=\"let a=document.getElementById('p1'),b=document.getElementById('p2');let t=a.type==='password'?'text':'password';a.type=t;b.type=t;\">Mostra/Nascondi password</button> ";
+  html += "<button class='button' type='button' onclick=\"document.getElementById('p1').value='';document.getElementById('p2').value='';document.getElementById('p1').focus();\">Cancella password</button></p>";
+  html += "<p><button class='button ok' type='submit'>Salva credenziali</button></p>";
+  html += "<p><small>Se lasci vuoti i campi password, viene mantenuta quella attuale.</small></p>";
+  html += "</form></div>";
+
+  html += "<div class='card warn'><div class='t'>Recupero</div><div class='v'>Reset credenziali</div>";
+  html += "<div class='e'>In Recovery AP puoi resettare utente/password ai valori default <b>admin / victron</b>.</div>";
+  html += "<p><a class='button danger' href='/webui-auth-reset?confirm=YES' onclick=\"return confirm('Reset credenziali WebUI ai valori default?');\">Reset credenziali WebUI</a></p></div>";
+  html += "</body></html>";
+  server.send(200, "text/html; charset=utf-8", html);
+}
+
+void handleWebAuthSave() {
+  if (!requireAuth()) return;
+  bool enabled = server.hasArg("enabled");
+  String user = cleanCredentialText(server.arg("user"), 24);
+  String p1 = cleanCredentialText(server.arg("pass1"), 64);
+  String p2 = cleanCredentialText(server.arg("pass2"), 64);
+  if (!validWebUser(user)) {
+    sendActionPage("Errore credenziali", "Nome utente non valido. Usa 3-24 caratteri: lettere, numeri, punto, trattino o underscore.", 4, "/webui-auth");
+    return;
+  }
+  String nextPass = webAuthPass;
+  if (p1.length() || p2.length()) {
+    if (p1 != p2) {
+      sendActionPage("Errore password", "Le due password non coincidono.", 4, "/webui-auth");
+      return;
+    }
+    if (!validWebPass(p1)) {
+      sendActionPage("Errore password", "La password deve avere tra 6 e 64 caratteri.", 4, "/webui-auth");
+      return;
+    }
+    nextPass = p1;
+  }
+  saveWebAuthSettings(enabled, user, nextPass);
+  addEventLog("SECURITY", String("WebUI auth ") + (enabled ? "abilitata" : "disabilitata") + " utente=" + user);
+  String msg = String("Impostazioni salvate. Protezione: ") + (enabled ? "attiva" : "disattivata") + ". Utente: " + user + ". La password non viene mostrata.";
+  sendActionPage("Sicurezza WebUI", msg, 3, "/webui-auth");
+}
+
+void handleWebAuthReset() {
+  if (!recoveryApActive) {
+    if (!requireAuth()) return;
+  }
+  if (!server.hasArg("confirm") || server.arg("confirm") != "YES") {
+    sendActionPage("Reset credenziali", "Conferma mancante. Nessuna modifica effettuata.", 3, "/webui-auth");
+    return;
+  }
+  saveWebAuthSettings(true, WEB_USER, WEB_PASS);
+  addEventLog("SECURITY", "Credenziali WebUI resettate ai default");
+  sendActionPage("Credenziali resettate", "Login attivo con utente default admin. Password default ripristinata. Cambiala appena possibile.", 5, "/webui-auth");
+}
+
 void handleRoot() {
   if (publicWizardShouldRedirectToSetup()) {
     server.sendHeader("Location", "/setup", true);
@@ -3486,7 +4023,7 @@ void handleRoot() {
   html += " &middot; " + String(victronOnline() ? "VE.Direct online" : "VE.Direct non collegato");
   html += " &middot; RSSI " + String(WiFi.RSSI()) + " dBm";
   html += "</div>";
-  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/updates'>Aggiornamenti & Sicurezza</a><a href='/data-center'>Dati & Storico</a><a href='/victron-data'>Dati Victron</a><a href='/energy-today'>Energia oggi</a><a href='/history-gx'>Storico GX</a><a href='/alerts'>Alert</a><a href='/setup-check'>Setup</a><a href='/settings'>Impostazioni</a><a href='/system-pro'>Sistema</a><a href='/battery'>Batteria ESP</a><a href='/power'>Power</a><a href='/network'>Rete/IP</a><a href='/files'>File & Log</a><a href='/diag'>Diagnostica</a><a href='/quick-check'>Check rapido</a></div>";
+  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/updates'>Aggiornamenti & Sicurezza</a><a href='/data-center'>Dati & Storico</a><a href='/victron-data'>Dati Victron</a><a href='/energy-today'>Energia oggi</a><a href='/history-gx'>Storico GX</a><a href='/alerts'>Alert</a><a href='/setup-check'>Setup</a><a href='/settings'>Impostazioni</a><a href='/system-pro'>Sistema</a><a href='/battery-health'>Salute Batteria</a><a href='/battery'>Batteria ESP</a><a href='/power'>Power</a><a href='/network'>Rete/IP</a><a href='/files'>File & Log</a><a href='/diag'>Diagnostica</a><a href='/quick-check'>Check rapido</a></div>";
   html += "</div>";
 
 
@@ -3530,7 +4067,7 @@ void handleRoot() {
     html += "<a class='gxAction' href='/energy-today'><b>Energia</b><span>Produzione oggi</span></a><a class='gxAction' href='/plant-info'><b>Impianto</b><span>Dati pannello/batteria</span></a>";
     html += "<a class='gxAction' href='/history-gx'><b>Storico GX</b><span>Grafici web</span></a>";
     html += "<a class='gxAction' href='/stats-sd'><b>Statistiche</b><span>Recap SD</span></a>";
-    html += "<a class='gxAction' href='/victron-data'><b>VE.Direct</b><span>Dati tecnici</span></a>";
+    html += "<a class='gxAction' href='/victron-data'><b>VE.Direct</b><span>Dati tecnici</span></a><a class='gxAction good' href='/load-monitor'><b>LOAD</b><span>Carico e consumo</span></a>";
     html += "</div></div>";
 
     html += "<div class='gxSection'><div class='gxSectionTitle'>Storage & microSD <span>log, CSV e memoria</span></div><div class='gxActions'>";
@@ -3625,7 +4162,7 @@ async function tick(){
   st('pv',Number(j.panel_voltage).toFixed(2));
   st('yt',Number(j.yield_today_kwh).toFixed(2));
   st('ytot',Number(j.yield_total_kwh).toFixed(2));
-  st('cs',j.charge_state||'N/D');
+  st('cs',j.charge_state_label||j.charge_state||'N/D');
   st('err',j.error||'0');
   st('espv',Number(j.esp_battery_voltage).toFixed(2));
   st('esppct',Number(j.esp_battery_percent).toFixed(0));
@@ -3651,13 +4188,13 @@ function popupText(x){
  const wh=Number(x.wh)||0, mw=Number(x.maxw)||0, mpv=Number(x.maxpv)||0, bmin=Number(x.battmin)||0, bmax=Number(x.battmax)||0;
  if(wh<=0 && mw<=0 && mpv<=0 && bmin<=0 && bmax<=0 && total<=0){return '<div class="tipTitle">'+x.label+'</div><div class="noData">Nessun dato registrato per questo periodo.</div>';}
  let state='';
- if(total>0){state='<div class="tipGrid"><span>Bulk</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Float</span><b>'+fmtDur(x.float_sec)+'</b><span>Off</span><b>'+fmtDur(x.off_sec)+'</b></div>';}
+ if(total>0){state='<div class="tipGrid"><span>Prima fase</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Mantenimento</span><b>'+fmtDur(x.float_sec)+'</b><span>Spento</span><b>'+fmtDur(x.off_sec)+'</b></div>';}
  const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';
  return '<div class="tipTitle">'+x.label+'</div><div class="tipGrid"><span>Produzione</span><b>'+Math.round(wh)+' Wh</b><span>P max</span><b>'+Math.round(mw)+' W</b><span>PV max</span><b>'+mpv.toFixed(2)+' V</b><span>Batt.</span><b>'+batt+'</b></div>'+state;
 }
 function stateRows(x){
  const total=Math.max(1,Number(x.charge_total_sec)||0);
- const arr=[['Bulk',x.bulk_sec],['Assorbimento',x.absorption_sec],['Float',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];
+ const arr=[['Prima fase',x.bulk_sec],['Assorbimento',x.absorption_sec],['Mantenimento',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];
  return arr.map(a=>'<div style="display:flex;align-items:center;gap:8px;margin:4px 0"><span style="width:92px">'+a[0]+'</span><div style="flex:1;height:8px;background:#1f2937;border-radius:8px;overflow:hidden"><div style="width:'+Math.round((Number(a[1]||0)/total)*100)+'%;height:8px;background:#58a6ff"></div></div><b>'+fmtDur(a[1])+'</b></div>').join('');
 }
 async function loadChrono(type){
@@ -3782,8 +4319,8 @@ void handleHistoryPage() {
   html += R"rawliteral(
 <script>
 function fmtDur(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';return m+'m';}
-function popupText(x){const total=Number(x.charge_total_sec)||0;const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<div class="tipTitle">'+x.label+'</div><div class="noData">Nessun dato registrato per questo periodo.</div>';let st='';if(total>0)st='<div class="tipGrid"><span>Bulk</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Float</span><b>'+fmtDur(x.float_sec)+'</b><span>Off</span><b>'+fmtDur(x.off_sec)+'</b></div>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<div class="tipTitle">'+x.label+'</div><div class="tipGrid"><span>Produzione</span><b>'+Math.round(wh)+' Wh</b><span>P max</span><b>'+Math.round(mw)+' W</b><span>PV max</span><b>'+mpv.toFixed(2)+' V</b><span>Batt.</span><b>'+batt+'</b></div>'+st;}
-function stateRows(x){const total=Math.max(1,Number(x.charge_total_sec)||0);const arr=[['Bulk',x.bulk_sec],['Assorbimento',x.absorption_sec],['Float',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];return arr.map(a=>'<div style="display:flex;align-items:center;gap:8px;margin:5px 0"><span style="width:110px">'+a[0]+'</span><div style="flex:1;height:8px;background:#1f2937;border-radius:8px;overflow:hidden"><div style="width:'+Math.round((Number(a[1]||0)/total)*100)+'%;height:8px;background:#58a6ff"></div></div><b>'+fmtDur(a[1])+'</b></div>').join('');}
+function popupText(x){const total=Number(x.charge_total_sec)||0;const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<div class="tipTitle">'+x.label+'</div><div class="noData">Nessun dato registrato per questo periodo.</div>';let st='';if(total>0)st='<div class="tipGrid"><span>Prima fase</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Mantenimento</span><b>'+fmtDur(x.float_sec)+'</b><span>Spento</span><b>'+fmtDur(x.off_sec)+'</b></div>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<div class="tipTitle">'+x.label+'</div><div class="tipGrid"><span>Produzione</span><b>'+Math.round(wh)+' Wh</b><span>P max</span><b>'+Math.round(mw)+' W</b><span>PV max</span><b>'+mpv.toFixed(2)+' V</b><span>Batt.</span><b>'+batt+'</b></div>'+st;}
+function stateRows(x){const total=Math.max(1,Number(x.charge_total_sec)||0);const arr=[['Prima fase',x.bulk_sec],['Assorbimento',x.absorption_sec],['Mantenimento',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];return arr.map(a=>'<div style="display:flex;align-items:center;gap:8px;margin:5px 0"><span style="width:110px">'+a[0]+'</span><div style="flex:1;height:8px;background:#1f2937;border-radius:8px;overflow:hidden"><div style="width:'+Math.round((Number(a[1]||0)/total)*100)+'%;height:8px;background:#58a6ff"></div></div><b>'+fmtDur(a[1])+'</b></div>').join('');}
 const data=allRows.slice(-viewCount);const max=Math.max(10,...data.map(x=>Number(x.wh)||0));let html="<div><div id='histTip' class='histTipBox'></div><div style='display:flex;align-items:end;gap:6px;height:150px;border-bottom:1px solid #30363d;margin-top:15px;padding-top:8px'>";
 data.forEach((x,i)=>{let h=Math.max(3,Math.round(((Number(x.wh)||0)/max)*98));html+="<div style='flex:1;text-align:center;cursor:pointer' onclick='showHistTip("+i+")'><div id='hbar"+i+"' style='height:"+h+"px;background:#79c0ff;border-radius:7px 7px 0 0'></div></div>";});
 html+="</div><div style='display:grid;grid-template-columns:repeat("+data.length+",1fr);gap:5px;font-size:11px;color:#8b949e;text-align:center;margin-top:6px'>";data.forEach(x=>html+="<div>"+String(x.label).replace(' giorni fa','g')+"</div>");html+="</div><div id='stateHist' class='card' style='margin-top:14px'></div><div id='summaryHist' style='display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:12px'></div></div>";document.getElementById('histCompact').innerHTML=html;
@@ -3837,8 +4374,8 @@ void handleHistoryCompact() {
   html += R"rawliteral(
 <script>
 function fmtDur(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';return m+'m';}
-function popupText(x){const total=Number(x.charge_total_sec)||0;const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<div class="tipTitle">'+x.label+'</div><div class="noData">Nessun dato registrato per questo periodo.</div>';let st='';if(total>0)st='<div class="tipGrid"><span>Bulk</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Float</span><b>'+fmtDur(x.float_sec)+'</b><span>Off</span><b>'+fmtDur(x.off_sec)+'</b></div>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<div class="tipTitle">'+x.label+'</div><div class="tipGrid"><span>Produzione</span><b>'+Math.round(wh)+' Wh</b><span>P max</span><b>'+Math.round(mw)+' W</b><span>PV max</span><b>'+mpv.toFixed(2)+' V</b><span>Batt.</span><b>'+batt+'</b></div>'+st;}
-function stateRows(x){const total=Math.max(1,Number(x.charge_total_sec)||0);const arr=[['Bulk',x.bulk_sec],['Assorbimento',x.absorption_sec],['Float',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];return arr.map(a=>'<div style="display:flex;align-items:center;gap:8px;margin:5px 0"><span style="width:110px">'+a[0]+'</span><div style="flex:1;height:8px;background:#1f2937;border-radius:8px;overflow:hidden"><div style="width:'+Math.round((Number(a[1]||0)/total)*100)+'%;height:8px;background:#58a6ff"></div></div><b>'+fmtDur(a[1])+'</b></div>').join('');}
+function popupText(x){const total=Number(x.charge_total_sec)||0;const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<div class="tipTitle">'+x.label+'</div><div class="noData">Nessun dato registrato per questo periodo.</div>';let st='';if(total>0)st='<div class="tipGrid"><span>Prima fase</span><b>'+fmtDur(x.bulk_sec)+'</b><span>Assorbimento</span><b>'+fmtDur(x.absorption_sec)+'</b><span>Mantenimento</span><b>'+fmtDur(x.float_sec)+'</b><span>Spento</span><b>'+fmtDur(x.off_sec)+'</b></div>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<div class="tipTitle">'+x.label+'</div><div class="tipGrid"><span>Produzione</span><b>'+Math.round(wh)+' Wh</b><span>P max</span><b>'+Math.round(mw)+' W</b><span>PV max</span><b>'+mpv.toFixed(2)+' V</b><span>Batt.</span><b>'+batt+'</b></div>'+st;}
+function stateRows(x){const total=Math.max(1,Number(x.charge_total_sec)||0);const arr=[['Prima fase',x.bulk_sec],['Assorbimento',x.absorption_sec],['Mantenimento',x.float_sec],['Spento',x.off_sec],['Altro',x.other_sec]];return arr.map(a=>'<div style="display:flex;align-items:center;gap:8px;margin:5px 0"><span style="width:110px">'+a[0]+'</span><div style="flex:1;height:8px;background:#1f2937;border-radius:8px;overflow:hidden"><div style="width:'+Math.round((Number(a[1]||0)/total)*100)+'%;height:8px;background:#58a6ff"></div></div><b>'+fmtDur(a[1])+'</b></div>').join('');}
 const max=Math.max(10,...rows.map(x=>Number(x.wh)||0));let html="<div><div id='tip' class='histTipBox'></div><div style='height:155px;display:flex;gap:6px;align-items:end;border-bottom:1px solid #30363d;margin-top:14px;padding-top:8px'>";
 rows.forEach((x,i)=>{const h=Math.max(3,Math.round(((Number(x.wh)||0)/max)*100));html+="<div style='flex:1;text-align:center;cursor:pointer' onclick='showTip("+i+")'><div id='cbar"+i+"' style='height:"+h+"px;background:#58a6ff;border-radius:8px 8px 0 0'></div></div>";});
 html+="</div><div style='display:grid;grid-template-columns:repeat("+rows.length+",1fr);gap:4px;font-size:10px;color:#8b949e;text-align:center;margin-top:6px'>";rows.forEach(x=>html+="<div>"+String(x.label).replace(' giorni fa','g')+"</div>");html+="</div><div id='chargeBox' class='card' style='margin-top:14px'></div><div id='quickBox' style='display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:12px'></div></div>";document.getElementById('hc').innerHTML=html;
@@ -3887,13 +4424,21 @@ void handleJson() {
   json += "\"yield_today_kwh\":" + String(isnan(yieldTodayKWh) ? 0 : yieldTodayKWh, 3) + ",";
   json += "\"yield_total_kwh\":" + String(isnan(yieldTotalKWh) ? 0 : yieldTotalKWh, 3) + ",";
   json += "\"charge_state\":\"" + chargeState + "\",";
+  json += "\"charge_state_label\":\"" + chargeStateItalianLabel(chargeState) + "\",";
   json += "\"mppt_state\":\"" + mpptState + "\",";
+  json += "\"mppt_state_label\":\"" + mpptStateItalianLabel(mpptState) + "\",";
   json += "\"error\":\"" + errorState + "\",";
   json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"esp_battery_voltage\":" + String(isnan(espBatteryVoltage()) ? 0 : espBatteryVoltage(), 3) + ",";
   json += "\"esp_battery_percent\":" + String(isnan(espBatteryPercent()) ? 0 : espBatteryPercent(), 0) + ",";
   json += "\"esp_battery_status\":\"" + espBatteryStatusText() + "\",";
   json += "\"esp_battery_connected\":\"" + espBatteryConnectionText() + "\",";
+  json += "\"load_state\":\"" + loadState + "\",";
+  json += "\"load_state_label\":\"" + loadStateItalianLabel() + "\",";
+  json += "\"load_current_a\":" + String(isfinite(loadCurrentA) ? loadCurrentA : 0.0f, 3) + ",";
+  json += "\"load_power_w\":" + String(isfinite(loadPowerWatts()) ? loadPowerWatts() : 0.0f, 2) + ",";
+  json += "\"vedirect_quality\":\"" + vedirectCommsQualityLabel() + "\",";
+  json += "\"victron_hds\":" + String(victronHistoryDaySequence) + ",";
   json += "\"alert_count\":" + String(alertCountNow()) + ",";
   json += "\"online\":" + String(victronOnline() ? "true" : "false");
   json += "}";
@@ -3944,7 +4489,7 @@ float espBatteryMultiplier() {
 }
 
 void saveEspBatteryMultiplier(float m) {
-  if (m < 1.20f || m > 3.20f) return;
+  if (m < 0.10f || m > 10.00f) return;
   prefs.begin("victron", false);
   prefs.putFloat("esp_bat_mult", m);
   prefs.end();
@@ -3954,9 +4499,7 @@ void saveEspBatteryMultiplier(float m) {
 
 float espBatteryVoltage() {
   // CYD: dallo scan ADC il candidato e' GPIO34. Moltiplicatore calibrazione salvabile da /battery-cal.
-  int adcPin = pubCfg.espBatteryAdcPin;
-  if (adcPin < 0) return NAN;
-  float pinV = adcPinVoltage(adcPin);
+  float pinV = adcPinVoltage(pubCfg.espBatteryAdcPin);
   float v = pinV * espBatteryMultiplier();
   if (v < 2.0f || v > 4.6f) return NAN;
   return v;
@@ -3976,15 +4519,14 @@ String espBatteryStatusText() {
 }
 
 String espBatteryConnectionText() {
-  // GPIO34 misura il nodo BAT, ma senza un pin CHG/STAT dedicato non puo' distinguere
-  // con certezza assoluta tra LiPo collegata e caricatore a vuoto.
-  prefs.begin("victron", true);
-  bool installed = prefs.getBool("esp_bat_installed", false);
-  prefs.end();
-  if (installed) return "LiPo collegata";
-  float v = espBatteryVoltage();
-  if (isnan(v)) return "Non rilevata";
-  return "Non confermata";
+  // Se la tensione stimata e' coerente con una LiPo 1S, mostriamo Collegata.
+  // La vecchia dicitura "Non confermata" creava confusione anche con 4.20 V / 100%.
+  float pinV = adcPinVoltage(pubCfg.espBatteryAdcPin);
+  float v = pinV * espBatteryMultiplier();
+  if (isnan(v) || isinf(v)) return "Non rilevata";
+  if (v >= 3.20f && v <= 4.30f) return "Collegata";
+  if (pinV > 3.10f) return "Lettura non valida";
+  return "Non rilevata";
 }
 
 String batteryScanJson() {
@@ -5507,7 +6049,7 @@ void handlePowerPage() {
   float ev = espBatteryVoltage();
   float ep = espBatteryPercent();
   String html = htmlHeader("Power / Alimentazione");
-  html += "<h1>Power / Alimentazione</h1><p><a href='/'>Dashboard</a> &middot; <a href='/battery'>Batteria ESP</a> &middot; <a href='/alerts'>Alert</a> &middot; <a href='/setup-check'>Setup</a></p>";
+  html += "<h1>Power / Alimentazione</h1><p><a href='/'>Dashboard</a> &middot; <a href='/battery'>Batteria ESP</a> &middot; <a href='/battery-health'>Battery Health</a> &middot; <a href='/night-power-saver'>Modalita notte</a> &middot; <a href='/alerts'>Alert</a> &middot; <a href='/setup-check'>Setup</a></p>";
   html += "<div class='gxHero'><div class='gxTop'><div><div class='gxTitle'>Stato alimentazione</div><div class='gxSub'>Diagnostica alimentazione, reboot e consumi</div></div><div class='gxPills'><span class='gxPill " + String(esp_reset_reason()==ESP_RST_BROWNOUT?"warn":"ok") + "'>" + esc(resetReasonText()) + "</span><span class='gxPill ok'>LCD auto " + displayAutoOffText() + "</span></div></div>";
   html += "<div class='gxGrid'><div class='gxBig bat'><div class='gxLabel'>BAT ESP / LiPo</div><div class='gxValue'>" + String(isnan(ev)?0:ev,2) + " V</div><div class='gxBar'><div class='gxBarFill' style='width:" + String((int)constrain(isnan(ep)?0:ep,0,100)) + "%'></div></div><div class='gxDetails'><div class='gxMini'><span>Carica</span><b>" + String(isnan(ep)?0:ep,0) + "%</b></div><div class='gxMini'><span>Stato</span><b>" + esc(espBatteryStatusText()) + "</b></div></div></div>";
   html += "<div class='gxSide'><div class='gxStatus'><div class='gxLabel'>Ultimo riavvio</div><div class='state'>" + esc(resetReasonText()) + "</div></div><div class='gxStatus'><div class='gxLabel'>Boot count</div><div class='state'>" + String(bootCounter) + "</div></div><div class='gxStatus'><div class='gxLabel'>Uptime</div><div class='state'>" + uptimeText() + "</div></div></div></div></div>";
@@ -5517,6 +6059,7 @@ void handlePowerPage() {
   html += card("Consumi", "LCD OFF", "Auto spegnimento: " + displayAutoOffText() + "<br><a class='button' href='/settings'>Impostazioni display</a>");
   html += card("VE.Direct", victronOnline()?"OK":"No Data", "Ultimo dato: " + String(victronSeen ? ((millis()-lastVictronMs)/1000UL) : 0) + " s fa");
   html += card("Shutdown software", "Disponibile", "Spegne WiFi, WebUI e display. La scheda resta alimentata.<br><a class='button danger' href='/shutdown'>Apri spegnimento remoto</a>");
+  html += card("Modalita notte", prefs.getBool("nps_enable", false) ? "Attiva" : "Manuale", "Riduce consumi con deep sleep programmato se batteria 12V scende sotto soglia.<br><a class='button' href='/night-power-saver'>Apri modalita notte</a>");
   html += "</div></body></html>";
   server.send(200, "text/html; charset=utf-8", html);
 }
@@ -5566,7 +6109,7 @@ void handleShutdownPage() {
   prefs.end();
 
   String html = htmlHeader("Shutdown software");
-  html += "<h1>Shutdown software remoto</h1><p><a href='/power'>Power</a> &middot; <a href='/settings'>Settings</a> &middot; <a href='/'>Dashboard</a></p>";
+  html += "<h1>Shutdown software remoto</h1><p><a href='/power'>Power</a> &middot; <a href='/battery-health'>Battery Health</a> &middot; <a href='/settings'>Settings</a> &middot; <a href='/'>Dashboard</a></p>";
   html += "<div class='card warn'><div class='t'>Attenzione</div>";
   html += "<p>Questo comando spegne il firmware: WiFi, WebUI, TFT/backlight e lettura VE.Direct vengono fermati e l'ESP32 entra in deep sleep.</p>";
   html += "<p><b>La scheda resta elettricamente alimentata</b> se USB-C, buck o LiPo sono collegati. Per togliere corrente serve staccare alimentazione o usare hardware esterno.</p>";
@@ -5578,20 +6121,15 @@ void handleShutdownPage() {
   html += card("Ultimo shutdown", esc(lastMode), "Motivo: " + esc(lastReason) + "<br>Timer: " + String(lastMin) + " min<br>Firmware: " + esc(lastFw) + "<br>Uptime precedente: " + String(lastUp) + " s");
   html += "</div>";
 
-  html += "<div class='card'><div class='t'>Spegni con timer</div>";
+  html += "<div class='card'><div class='t'>Spegni con timer personalizzato</div>";
   html += "<form method='get' action='/shutdown-timed' onsubmit=\"return confirm('Spegnere la CYD per il tempo scelto? La WebUI non sara disponibile fino al risveglio.')\">";
-  html += "<p>Minuti: <select name='min'>";
-  for (int m = 1; m <= 30; m++) {
-    html += "<option value='" + String(m) + "'" + String(m==5 ? " selected" : "") + ">" + String(m) + " min</option>";
-  }
-  const int extraMins[] = {45,60,90,120,180,240,360,480,720,1440};
-  for (size_t i=0; i<sizeof(extraMins)/sizeof(extraMins[0]); i++) {
-    int m = extraMins[i];
-    String label = (m < 60) ? (String(m) + " min") : (String(m/60) + (m%60==0 ? " h" : " h " + String(m%60) + " min"));
-    html += "<option value='" + String(m) + "'>" + label + "</option>";
-  }
-  html += "</select> <button type='submit'>Spegni con timer</button></p></form>";
-  html += "<p class='e'>Puoi usare 1, 2, 3, 4, 5 minuti e valori superiori. Limite massimo: 1440 minuti.</p>";
+  html += "<p>Ore <input name='h' type='number' min='0' max='24' value='5' style='max-width:90px'> Minuti <input name='m' type='number' min='0' max='59' value='30' style='max-width:90px'> <button type='submit'>Spegni</button></p>";
+  html += "<p class='e'>Imposta durata precisa. Esempio: 5 ore e 30 minuti.</p>";
+  html += "</form>";
+  html += "<form method='get' action='/shutdown-timed' onsubmit=\"return confirm('Spegnere la CYD fino all’orario scelto?')\">";
+  html += "<p>Riaccendi alle <input name='wake' type='time' value='05:30'> <button type='submit'>Spegni fino a orario</button></p>";
+  html += "<p class='e'>Usa l'orario locale se NTP e' sincronizzato. Se l'orario non e' disponibile, usa il timer ore/minuti.</p>";
+  html += "</form>";
   html += "</div>";
 
   html += "<div class='card danger'><div class='t'>Spegni fino a reset</div>";
@@ -5603,7 +6141,29 @@ void handleShutdownPage() {
 
 void handleShutdownTimed() {
   if (!requireAuth()) return;
-  int minutes = server.hasArg("min") ? server.arg("min").toInt() : 5;
+  int minutes = server.hasArg("min") ? server.arg("min").toInt() : 0;
+  if (server.hasArg("h") || server.hasArg("m")) {
+    int hh = server.hasArg("h") ? server.arg("h").toInt() : 0;
+    int mm = server.hasArg("m") ? server.arg("m").toInt() : 0;
+    if (hh < 0) hh = 0; if (hh > 24) hh = 24;
+    if (mm < 0) mm = 0; if (mm > 59) mm = 59;
+    minutes = hh * 60 + mm;
+  }
+  if (server.hasArg("wake")) {
+    String w = server.arg("wake");
+    int colon = w.indexOf(':');
+    if (colon > 0) {
+      int wh = w.substring(0, colon).toInt();
+      int wm = w.substring(colon + 1).toInt();
+      struct tm ti;
+      if (getLocalTime(&ti, 500)) {
+        int nowMin = ti.tm_hour * 60 + ti.tm_min;
+        int targetMin = constrain(wh, 0, 23) * 60 + constrain(wm, 0, 59);
+        minutes = targetMin - nowMin;
+        if (minutes <= 0) minutes += 1440;
+      }
+    }
+  }
   if (minutes < 1) minutes = 1;
   if (minutes > 1440) minutes = 1440;
 
@@ -5630,6 +6190,166 @@ void handleShutdownReset() {
   server.send(200, "text/html; charset=utf-8", html);
   delay(1200);
   enterSoftwareShutdown(0, false, "Shutdown remoto fino a reset");
+}
+
+
+float nightSaverThresholdV() {
+  prefs.begin("victron", true);
+  float v = prefs.getFloat("nps_thr_v", 11.80f);
+  prefs.end();
+  if (!isfinite(v) || v < 10.5f || v > 13.0f) v = 11.80f;
+  return v;
+}
+
+String nightSaverWakeTime() {
+  prefs.begin("victron", true);
+  String w = prefs.getString("nps_wake", "05:30");
+  prefs.end();
+  if (w.length() != 5 || w.charAt(2) != ':') w = "05:30";
+  return w;
+}
+
+uint32_t minutesUntilWakeTime(const String& wake) {
+  int colon = wake.indexOf(':');
+  if (colon <= 0) return 360;
+  int wh = constrain(wake.substring(0, colon).toInt(), 0, 23);
+  int wm = constrain(wake.substring(colon + 1).toInt(), 0, 59);
+  struct tm ti;
+  if (getLocalTime(&ti, 500)) {
+    int nowMin = ti.tm_hour * 60 + ti.tm_min;
+    int targetMin = wh * 60 + wm;
+    int delta = targetMin - nowMin;
+    if (delta <= 0) delta += 1440;
+    return (uint32_t)constrain(delta, 1, 1440);
+  }
+  return 360; // fallback sicuro se NTP non e' disponibile
+}
+
+String lowBattery12StatusText(float v) {
+  if (!isfinite(v) || v <= 0.1f) return "Dati insufficienti";
+  if (v < 11.50f) return "Critica: scollegare carichi e ricaricare";
+  if (v < 11.80f) return "Molto bassa: consigliato spegnimento notturno";
+  if (v < 12.00f) return "Bassa: monitorare";
+  if (v < 12.30f) return "Scarica/parziale";
+  return "OK";
+}
+
+void handleNightPowerSaverJson() {
+  server.sendHeader("Cache-Control", "no-store, max-age=0");
+  prefs.begin("victron", true);
+  bool en = prefs.getBool("nps_enable", false);
+  float thr = prefs.getFloat("nps_thr_v", 11.80f);
+  String wake = prefs.getString("nps_wake", "05:30");
+  bool displayOff = prefs.getBool("nps_lcd", true);
+  bool onlyNight = prefs.getBool("nps_night", true);
+  prefs.end();
+  String j = "{";
+  j += "\"firmware\":\"" + String(FW_VERSION) + "\",";
+  j += "\"enabled\":" + String(en ? "true" : "false") + ",";
+  j += "\"battery_voltage\":" + String(isnan(battV) ? 0 : battV, 3) + ",";
+  j += "\"threshold_voltage\":" + String(thr, 2) + ",";
+  j += "\"wake_time\":\"" + wake + "\",";
+  j += "\"minutes_to_wake\":" + String(minutesUntilWakeTime(wake)) + ",";
+  j += "\"display_off_enabled\":" + String(displayOff ? "true" : "false") + ",";
+  j += "\"only_night\":" + String(onlyNight ? "true" : "false") + ",";
+  j += "\"status\":\"" + lowBattery12StatusText(battV) + "\"";
+  j += "}";
+  sendJsonPretty(j);
+}
+
+void handleNightPowerSaverPage() {
+  if (!requireAuth()) return;
+  prefs.begin("victron", true);
+  bool en = prefs.getBool("nps_enable", false);
+  float thr = prefs.getFloat("nps_thr_v", 11.80f);
+  String wake = prefs.getString("nps_wake", "05:30");
+  bool lcd = prefs.getBool("nps_lcd", true);
+  bool onlyNight = prefs.getBool("nps_night", true);
+  prefs.end();
+  if (!isfinite(thr) || thr < 10.5f || thr > 13.0f) thr = 11.80f;
+
+  String html = htmlHeader("Modalita notte / Power saver");
+  html += "<h1>Modalita notte / Power saver</h1><p><a href='/power'>Power</a> &middot; <a href='/shutdown'>Shutdown</a> &middot; <a href='/battery-health'>Battery Health</a> &middot; <a href='/'>Dashboard</a></p>";
+  html += "<div class='grid'>";
+  html += card("Batteria 12V", isnan(battV)?"N/D":String(battV,2)+" V", lowBattery12StatusText(battV));
+  html += card("Stato modalita notte", en?"Automatica attiva":"Manuale", "Soglia: " + String(thr,2) + " V<br>Risveglio: " + esc(wake) + "<br>Minuti al risveglio: " + String(minutesUntilWakeTime(wake)));
+  html += card("Consumo", "Ridotto in deep sleep", "Spegne WiFi, WebUI, TFT/backlight e ferma le letture fino al risveglio programmato. Il buck resta alimentato se non hai MOSFET/EN esterno.");
+  html += "</div>";
+  html += "<div class='card warn'><div class='t'>Protezione batteria 12V</div><p>La modalita automatica entra in deep sleep solo se abilitata e se la tensione batteria scende sotto soglia per alcuni minuti. Default consigliato: 11.8 V, risveglio 05:30.</p></div>";
+  html += "<div class='card'><div class='t'>Impostazioni power saver</div>";
+  html += "<form method='post' action='/night-power-saver-save'>";
+  html += "<p><label><input type='checkbox' name='enable' " + String(en?"checked":"") + "> Abilita shutdown automatico batteria bassa</label></p>";
+  html += "<p>Soglia batteria 12V <input name='thr' type='number' step='0.05' min='10.5' max='13.0' value='" + String(thr,2) + "' style='max-width:120px'> V</p>";
+  html += "<p>Riaccendi alle <input name='wake' type='time' value='" + esc(wake) + "'></p>";
+  html += "<p><label><input type='checkbox' name='lcd' " + String(lcd?"checked":"") + "> Spegni sempre LCD/backlight quando entra in modalita notte</label></p>";
+  html += "<p><label><input type='checkbox' name='night' " + String(onlyNight?"checked":"") + "> Esegui auto-shutdown solo di notte se NTP disponibile</label></p>";
+  html += "<p><button type='submit'>Salva impostazioni</button></p>";
+  html += "</form></div>";
+  html += "<div class='card'><div class='t'>Azioni manuali</div>";
+  html += "<p><a class='button danger' href='/shutdown-timed?wake=" + esc(wake) + "' onclick=\"return confirm('Entrare subito in deep sleep fino all’orario configurato?')\">Spegni ora fino alle " + esc(wake) + "</a></p>";
+  html += "<p><a class='button' href='/night-power-saver.json'>Apri JSON</a></p>";
+  html += "</div></body></html>";
+  server.send(200, "text/html; charset=utf-8", html);
+}
+
+void handleNightPowerSaverSave() {
+  if (!requireAuth()) return;
+  bool en = server.hasArg("enable");
+  bool lcd = server.hasArg("lcd");
+  bool onlyNight = server.hasArg("night");
+  float thr = server.hasArg("thr") ? server.arg("thr").toFloat() : 11.80f;
+  if (!isfinite(thr) || thr < 10.5f || thr > 13.0f) thr = 11.80f;
+  String wake = server.hasArg("wake") ? server.arg("wake") : "05:30";
+  if (wake.length() != 5 || wake.charAt(2) != ':') wake = "05:30";
+  prefs.begin("victron", false);
+  prefs.putBool("nps_enable", en);
+  prefs.putBool("nps_lcd", lcd);
+  prefs.putBool("nps_night", onlyNight);
+  prefs.putFloat("nps_thr_v", thr);
+  prefs.putString("nps_wake", wake);
+  prefs.end();
+  addEventLog("POWER", String("Night saver ") + (en?"abilitato":"disabilitato") + " soglia " + String(thr,2) + " wake " + wake);
+  sendActionPage("Modalita notte", "Impostazioni salvate.", 2, "/night-power-saver");
+}
+
+void nightPowerSaverLoop() {
+  static unsigned long belowSince = 0;
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck < 5000UL) return;
+  lastCheck = millis();
+
+  prefs.begin("victron", true);
+  bool en = prefs.getBool("nps_enable", false);
+  float thr = prefs.getFloat("nps_thr_v", 11.80f);
+  String wake = prefs.getString("nps_wake", "05:30");
+  bool onlyNight = prefs.getBool("nps_night", true);
+  prefs.end();
+  if (!en) { belowSince = 0; return; }
+  if (!victronOnline() || !isfinite(battV) || battV <= 0.1f) { belowSince = 0; return; }
+  if (!isfinite(thr) || thr < 10.5f || thr > 13.0f) thr = 11.80f;
+
+  if (onlyNight) {
+    struct tm ti;
+    if (getLocalTime(&ti, 50)) {
+      bool night = (ti.tm_hour >= 20 || ti.tm_hour < 7);
+      if (!night) { belowSince = 0; return; }
+    }
+  }
+
+  // Evita deep sleep se il pannello sta caricando in modo significativo.
+  if (isfinite(panelW) && panelW > 8.0f) { belowSince = 0; return; }
+
+  if (battV < thr) {
+    if (belowSince == 0) belowSince = millis();
+    if (millis() - belowSince > 180000UL) {
+      uint32_t mins = minutesUntilWakeTime(wake);
+      if (mins < 5) mins = 5;
+      if (mins > 1440) mins = 1440;
+      enterSoftwareShutdown(mins, true, "Night power saver: batteria 12V bassa " + String(battV,2) + " V");
+    }
+  } else {
+    belowSince = 0;
+  }
 }
 
 void handleSdMaintenancePage() {
@@ -5703,8 +6423,8 @@ void handleBatteryPage() {
 
   String html = htmlHeader("Batteria ESP");
   html += "<div class='top'><h1>Batteria ESP / LiPo tampone</h1>";
-  html += "<div class='sub'>Monitor della batteria tampone della scheda ESP32/CYD. Lettura GPIO34, moltiplicatore 2.14, PWM luminosita' disattivato.</div>";
-  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/battery'>Batteria ESP</a><a href='/bat-scan'>BAT scan</a><a href='/battery.json'>JSON</a><a href='/settings'>Impostazioni</a><a href='/system-pro'>Sistema</a></div></div>";
+  html += "<div class='sub'>Monitor della batteria tampone della scheda ESP32/CYD. Lettura GPIO" + String(pubCfg.espBatteryAdcPin) + ", moltiplicatore 2.14, PWM luminosita' disattivato.</div>";
+  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/battery'>Batteria ESP</a><a href='/battery-health'>Battery Health</a><a href='/bat-scan'>BAT scan</a><a href='/battery.json'>JSON</a><a href='/settings'>Impostazioni</a><a href='/system-pro'>Sistema</a></div></div>";
 
   html += "<div class='" + heroClass + "'>";
   html += "<div class='t'>Stato batteria tampone</div>";
@@ -5724,6 +6444,7 @@ void handleBatteryPage() {
   html += card("Percentuale", String(isnan(pct) ? 0 : pct, 0) + "%", "Stima indicativa. Da calibrare con LiPo reale montata.");
   html += card("Stato", st, "Soglie: Piena / OK / Bassa / Critica.<br>LiPo: " + esc(espBatteryConnectionText()));
   html += card("Diagnostica", "BAT scan", "<a class='button' href='/bat-scan'>Apri scansione ADC</a>");
+  html += card("Battery Health", "Scarica 12 V", "<a class='button' href='/battery-health'>Apri salute batteria impianto</a>");
   html += "</div>";
 
   html += "<div class='card warn'><div class='t'>Sicurezza LiPo</div><div class='e'>Usa solo LiPo 1S 3.7 V, massimo 4.2 V. Verifica sempre polarita' BAT+ e BAT-. Non collegare batterie 2S/7.4 V.</div></div>";
@@ -5762,12 +6483,12 @@ void handleBatteryJson() {
   j += "\"firmware\":\"" + String(FW_VERSION) + "\",";
   j += "\"source_gpio\":" + String(pubCfg.espBatteryAdcPin) + ",";
   j += "\"multiplier\":" + String(espBatteryMultiplier(), 4) + ",";
-  j += "\"adc_pin_voltage\":" + String(pubCfg.espBatteryAdcPin < 0 ? 0 : adcPinVoltage(pubCfg.espBatteryAdcPin), 3) + ",";
+  j += "\"adc_pin_voltage\":" + String(adcPinVoltage(pubCfg.espBatteryAdcPin), 3) + ",";
   j += "\"lipo_voltage\":" + String(isnan(v) ? 0 : v, 3) + ",";
   j += "\"percent\":" + String(isnan(pct) ? 0 : pct, 0) + ",";
   j += "\"status\":\"" + espBatteryStatusText() + "\",";
   j += "\"connection\":\"" + espBatteryConnectionText() + "\",";
-  j += "\"note\":\"Stima su GPIO34 con moltiplicatore 2.14, da calibrare con LiPo reale\"";
+  j += "\"note\":\"Stima su GPIO" + String(pubCfg.espBatteryAdcPin) + " con moltiplicatore configurabile, da calibrare con LiPo reale\"";
   j += "}";
   sendJsonPretty(j);
 }
@@ -5980,7 +6701,7 @@ void handleBatteryCalPage() {
   if (msg.length()) html += "<div class='banner'>" + msg + "</div>";
   html += "<div class='grid'>";
   html += card("Firmware legge", String(isnan(v)?0:v,3) + " V", "Percentuale: " + String(isnan(pct)?0:pct,0) + "%<br>Moltiplicatore: " + String(espBatteryMultiplier(),4));
-  html += card("ADC GPIO" + String(pubCfg.espBatteryAdcPin), String(pinV,3) + " V", "Tensione letta sul pin ADC");
+  html += card("ADC GPIO34", String(pinV,3) + " V", "Tensione letta sul pin ADC");
   html += "</div>";
   html += "<div class='card'><div class='t'>Nuova calibrazione</div><form method='get' action='/battery-cal'><p>Misura col tester la LiPo/BAT e inserisci il valore reale:</p><input name='real' placeholder='es. 4.158' inputmode='decimal'> <button type='submit'>Calibra</button></form><div class='e'>Solo LiPo 1S 3.7 V, max 4.2 V. Non usare 2S/7.4 V.</div></div>";
   html += "</body></html>";
@@ -6009,7 +6730,7 @@ function drawBars(id,data,key,color,scale,label,unit){
  data.forEach((x,i)=>{let v=Number(x[key]||0);let bh=Math.max(0,Math.min(1,v/max))*(h-48);let x0=48+i*bw;let y=h-31-bh;ctx.fillStyle=color;ctx.fillRect(x0,y,Math.max(2,bw-3),bh);});
 }
 function fmtDur(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';return m+'m';}
-function pointText(x){const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0,total=Number(x.charge_total_sec)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<b>'+x.label+'</b><br><span class=\"noData\">Nessun dato registrato.</span>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<b>'+x.label+'</b><br>Produzione '+Math.round(wh)+' Wh · P max '+Math.round(mw)+' W<br>PV max '+mpv.toFixed(2)+' V · Batt '+batt+'<br>Bulk '+fmtDur(x.bulk_sec)+' · Ass '+fmtDur(x.absorption_sec)+' · Float '+fmtDur(x.float_sec)+' · Off '+fmtDur(x.off_sec);}
+function pointText(x){const wh=Number(x.wh)||0,mw=Number(x.maxw)||0,mpv=Number(x.maxpv)||0,bmin=Number(x.battmin)||0,bmax=Number(x.battmax)||0,total=Number(x.charge_total_sec)||0;if(wh<=0&&mw<=0&&mpv<=0&&bmin<=0&&bmax<=0&&total<=0)return '<b>'+x.label+'</b><br><span class=\"noData\">Nessun dato registrato.</span>';const batt=(bmin>0&&bmax>0)?(bmin.toFixed(2)+'-'+bmax.toFixed(2)+' V'):'N/D';return '<b>'+x.label+'</b><br>Produzione '+Math.round(wh)+' Wh · P max '+Math.round(mw)+' W<br>PV max '+mpv.toFixed(2)+' V · Batt '+batt+'<br>Prima fase '+fmtDur(x.bulk_sec)+' · Ass '+fmtDur(x.absorption_sec)+' · Mantenimento '+fmtDur(x.float_sec)+' · Spento '+fmtDur(x.off_sec);}
 function bindCanvasTip(id,data){const c=document.getElementById(id);if(!c)return;c.onclick=(ev)=>{const r=c.getBoundingClientRect();const x=ev.clientX-r.left;const idx=Math.max(0,Math.min(data.length-1,Math.floor((x/(r.width||1))*data.length)));const tip=document.getElementById('gxTip');tip.innerHTML=pointText(data[idx]||{});tip.style.display='block';};}
 function avg(a,k){let vals=a.map(x=>Number(x[k]||0)).filter(x=>x>0);return vals.length?vals.reduce((p,c)=>p+c,0)/vals.length:0;}
 drawBars('c24',h24,'maxw','#f2cc60',Math.max(1,Number(configuredPanelW)||120),'Scala pannello','W'); drawBars('c31',d31,'wh','#7ee787',0,'Max periodo','Wh'); bindCanvasTip('c24',h24); bindCanvasTip('c31',d31);
@@ -6447,7 +7168,7 @@ async function live(){try{const r=await fetch('/json?_='+Date.now(),{cache:'no-s
  set('d_bw',Number(j.battery_power).toFixed(1)+' W');
  set('d_yt',Number(j.yield_today_kwh).toFixed(3)+' kWh');
  set('d_ytt',Number(j.yield_total_kwh).toFixed(2)+' kWh');
- set('d_cs',j.charge_state||'N/D');
+ set('d_cs',j.charge_state_label||j.charge_state||'N/D');
  set('d_er',j.error||'0');
  set('d_rssi',j.wifi_rssi+' dBm');
  set('d_esp',Number(j.esp_battery_voltage).toFixed(2)+' V / '+Number(j.esp_battery_percent).toFixed(0)+'%');
@@ -6483,10 +7204,10 @@ void handleSystemPro() {
   html += "<h1>Sistema Pro</h1><p><a href='/'>Dashboard</a> &middot; <a href='/updates'>Aggiornamenti & Sicurezza</a> &middot; <a href='/data-center'>Dati & Storico</a></p>";
   html += "<div class='grid'>";
   html += card("Firmware", String(FW_VERSION), String(FW_NAME) + "<br>Build: " + buildText());
-  html += card("Profilo hardware", "diymore IO27", "VE.Direct RX: IO27<br>VE.Direct TX: disabilitato<br>ESP Battery: GPIO34<br>OTA repo: victron-esp32-monitor-ota");
+  html += card("Profilo hardware", "diymore IO27", "VE.Direct RX: IO27<br>VE.Direct TX: disabilitato<br>ESP Battery: GPIO34<br>OTA repo: victron-vedirect-esp32-monitor-ota");
   html += card("ESP32", String(ESP.getFreeHeap()) + " heap", "Uptime: " + uptimeText() + "<br>Boot: " + String(bootCounter));
   html += card("Batteria ESP", "BAT scan", "Tensione e percentuale LiPo tampone ESP.<br><a class='button' href='/battery'>Apri Batteria ESP</a> <a class='button' href='/bat-scan'>BAT scan</a>");
-  html += card("WiFi", WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm<br>Hostname: " + String(HOSTNAME));
+  html += card("WiFi", WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm<br>Hostname: " + runtimeHostname());
   html += card("LittleFS", littleFsReady ? "Attivo" : "Non attivo", littleFsReady ? ("Usati " + String((unsigned long)LittleFS.usedBytes()) + " / " + String((unsigned long)LittleFS.totalBytes())) : "Storico persistente non disponibile");
   html += card("MicroSD", sdMounted ? "Montata" : "Smontata", sdMounted ? ("Usati " + formatBytes64(SD.usedBytes()) + " / " + formatBytes64(SD.totalBytes()) + "<br>Storage: " + storageMode() + "<br><a class='button' href='/sd'>Gestisci SD</a> <a class='button' href='/storage'>Storage</a>") : (esc(sdLastStatus) + "<br><a class='button' href='/sd'>Gestisci SD</a> <a class='button' href='/storage'>Storage</a>"));
   html += card("Rollback", esc(prefGet("rollback_status", rollbackStatus)), otaPartitionJson());
@@ -6537,7 +7258,7 @@ void handleGithubUpdatePage() {
   html += "<p><b>Ultimo controllo automatico:</b> " + esc(weeklyStatus) + "</p>";
   html += "<p><button type='submit'>Salva URL GitHub</button></p>";
   html += "</form>";
-  html += "<p><small>URL consigliato firmware: https://raw.githubusercontent.com/alessioquartarone-ui/victron-esp32-monitor-ota/main/firmware/latest.bin</small></p>";
+  html += "<p><small>URL consigliato firmware: https://raw.githubusercontent.com/alessioquartarone-ui/victron-vedirect-esp32-monitor-ota/main/firmware/latest.bin</small></p>";
   html += "</div>";
   String changelog = getGithubChangelogUrl().length() ? httpGetString(getGithubChangelogUrl(), 6000) : "";
   if (changelog.length()) html += "<div class='card'><div class='t'>Changelog remoto</div><pre style='white-space:pre-wrap'>" + esc(changelog) + "</pre></div>";
@@ -6820,11 +7541,13 @@ void handleSettings() {
   }
 
   String html = htmlHeader("Settings");
-  html += "<h1>Impostazioni</h1><p><a href='/'>Dashboard</a> &middot; <a href='/updates'>Aggiornamenti & Sicurezza</a> &middot; <a href='/data-center'>Dati & Storico</a> &middot; <a href='/system-pro'>Sistema</a> &middot; <a href='/network'>Rete/IP</a></p>";
+  html += "<h1>Impostazioni</h1><p><a href='/'>Dashboard</a> &middot; <a href='/updates'>Aggiornamenti & Sicurezza</a> &middot; <a href='/data-center'>Dati & Storico</a> &middot; <a href='/system-pro'>Sistema</a> &middot; <a href='/network'>Rete/IP</a> &middot; <a href='/wifi'>WiFi Manager</a> &middot; <a href='/webui-auth'>Sicurezza WebUI</a></p>";
 
   html += "<div class='card'><div class='t'>Stato</div>";
   html += "<p><b>Firmware:</b> " + String(FW_VERSION) + "</p>";
   html += "<p><b>WiFi:</b> " + String(WiFi.SSID()) + " - IP " + WiFi.localIP().toString() + "</p>";
+  html += "<p><a class='button' href='/wifi'>Apri WiFi Manager Pro</a> <a class='button' href='/webui-auth'>Sicurezza WebUI</a></p>";
+  html += "<p><b>Protezione WebUI:</b> " + String(webAuthEnabled ? "Attiva" : "Disattivata") + " - utente " + esc(webAuthUser) + "</p>";
   html += "<p><b>Retroilluminazione:</b> " + String(backlightOn ? "ON" : "OFF") + "</p>";
   prefs.begin("victron", true);
   bool touchDisabledUi = prefs.getBool("touch_disabled", false);
@@ -6876,7 +7599,7 @@ void handleSettings() {
 
   html += "<div class='card'><div class='t'>WiFi / Rete</div>";
   html += "<p>Se cambia l'IP dopo riavvio router, usa la prenotazione DHCP sul router usando il MAC della CYD.</p>";
-  html += "<p><b>IP attuale:</b> " + WiFi.localIP().toString() + "<br><b>MAC:</b> " + WiFi.macAddress() + "<br><b>Hostname:</b> " + String(HOSTNAME) + "<br><b>RSSI:</b> " + String(WiFi.RSSI()) + " dBm</p>";
+  html += "<p><b>IP attuale:</b> " + WiFi.localIP().toString() + "<br><b>MAC:</b> " + WiFi.macAddress() + "<br><b>Hostname:</b> " + runtimeHostname() + "<br><b>RSSI:</b> " + String(WiFi.RSSI()) + " dBm</p>";
   html += "<p><a class='button' href='/network'>Apri pagina rete</a> <a class='button' href='/network.json'>network.json</a></p>";
   html += "<p><b>AP setup:</b> Victron-ESP32-Setup / password 12345678</p>";
   html += "<form method='get' action='/settings' onsubmit=\"return confirm('Cancellare il WiFi salvato e riavviare in setup?')\">";
@@ -7305,9 +8028,9 @@ void handleInfo() {
   html += "<p><b>Ultimo OTA:</b> " + prefGet("ota_status", "N/D") + " - " + prefGet("ota_time", "N/D") + "</p>";
   html += "<p><b>Dettaglio OTA:</b> " + esc(prefGet("ota_detail", "N/D")) + "</p>";
   html += "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>";
-  html += "<p><b>Hostname:</b> " + String(HOSTNAME) + "</p>";
-  html += "<p><b>WiFi setup AP:</b> " + String(WIFI_SETUP_AP) + "</p>";
-  html += "<p><b>mDNS:</b> http://" + String(HOSTNAME) + ".local</p>";
+  html += "<p><b>Hostname:</b> " + runtimeHostname() + "</p>";
+  html += "<p><b>WiFi setup AP:</b> " + runtimeSetupApSsid() + "</p>";
+  html += "<p><b>mDNS:</b> http://" + runtimeHostname() + ".local</p>";
   html += "<p><b>RSSI:</b> " + String(WiFi.RSSI()) + " dBm</p>";
   html += "<p><b>VE.Direct:</b> " + String(victronOnline() ? "online" : "non collegato") + "</p>";
   html += "</div></body></html>";
@@ -7319,16 +8042,122 @@ void handleNotFound() {
   server.send(404, "text/plain", "404");
 }
 
+bool wifiCustomEnabled() {
+  prefs.begin("victron", true);
+  bool enabled = prefs.getBool("wifi_custom", false);
+  String ssid = prefs.getString("wifi_ssid", "");
+  prefs.end();
+  ssid.trim();
+  return enabled && ssid.length() > 0;
+}
+
+String wifiConfiguredSsid() {
+  prefs.begin("victron", true);
+  bool enabled = prefs.getBool("wifi_custom", false);
+  String ssid = prefs.getString("wifi_ssid", "");
+  prefs.end();
+  ssid.trim();
+  if (enabled && ssid.length() > 0) return ssid;
+  return String(WIFI_SSID);
+}
+
+String wifiConfiguredPass() {
+  prefs.begin("victron", true);
+  bool enabled = prefs.getBool("wifi_custom", false);
+  String pass = prefs.getString("wifi_pass", "");
+  prefs.end();
+  if (enabled) return pass;
+  return String(WIFI_PASS);
+}
+
+String wifiSecurityText(uint8_t enc) {
+  switch (enc) {
+    case WIFI_AUTH_OPEN: return "Aperta";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/WPA2";
+#ifdef WIFI_AUTH_WPA2_ENTERPRISE
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2 Enterprise";
+#endif
+#ifdef WIFI_AUTH_WPA3_PSK
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+#endif
+    default: return "Protetta";
+  }
+}
+
+String wifiQualityText(int rssi) {
+  if (rssi >= -65) return "Ottima";
+  if (rssi >= -75) return "Buona";
+  if (rssi >= -85) return "Debole";
+  return "Critica";
+}
+
+bool connectConfiguredWiFi(unsigned long timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setHostname(runtimeHostname().c_str());
+
+  String ssid = wifiConfiguredSsid();
+  String pass = wifiConfiguredPass();
+  ssid.trim();
+
+  drawBootProgress("Connessione WiFi salvata", 55);
+  if (ssid.length() > 0) WiFi.begin(ssid.c_str(), pass.c_str());
+  else WiFi.begin();
+
+  unsigned long start = millis();
+  int lastDots = -1;
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+    ArduinoOTA.handle();
+    delay(250);
+    int dots = ((millis() - start) / 1000) % 4;
+    if (dots != lastDots) {
+      lastDots = dots;
+      String m = "Connessione WiFi salvata";
+      for (int i = 0; i < dots; i++) m += ".";
+      int pct = 55 + (int)((millis() - start) * 12UL / timeoutMs);
+      if (pct > 67) pct = 67;
+      drawBootProgress(m, pct);
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    drawBootProgress("WiFi OK: " + WiFi.localIP().toString(), 70);
+    prefs.begin("victron", false);
+    prefs.putString("wifi_last_ok_ssid", WiFi.SSID());
+    prefs.putString("wifi_last_ok_ip", WiFi.localIP().toString());
+    prefs.putInt("wifi_last_ok_rssi", WiFi.RSSI());
+    prefs.remove("wifi_last_error");
+    prefs.end();
+    delay(300);
+    return true;
+  }
+
+  prefs.begin("victron", false);
+  prefs.putString("wifi_last_error", "Connessione fallita: usare portale AP se necessario");
+  prefs.end();
+  return false;
+}
+
 void ensureWiFi() {
-  // Public build: do not reconnect using hardcoded credentials.
-  // WiFiManager stores credentials in NVS; WiFi.reconnect() reuses those safely.
+  // Public build: no hardcoded WiFi credentials.
+  // WiFiManager stores credentials in NVS; WiFi.reconnect()/WiFi.begin() reuses those safely.
   if (millis() - lastWiFiCheckMs < 30000UL) return;
   lastWiFiCheckMs = millis();
-
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(runtimeHostname().c_str());
-    WiFi.reconnect();
+    String ssid = wifiConfiguredSsid();
+    String pass = wifiConfiguredPass();
+    ssid.trim();
+    if (ssid.length() > 0) WiFi.begin(ssid.c_str(), pass.c_str());
+    else WiFi.reconnect();
   }
 }
 
@@ -7414,7 +8243,7 @@ void drawWiFiSetupScreen(const String& msg) {
 
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.setCursor(12, 120);
-  tft.print(WIFI_SETUP_AP);
+  tft.print(runtimeSetupApSsid());
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setCursor(12, 155);
@@ -7422,7 +8251,7 @@ void drawWiFiSetupScreen(const String& msg) {
 
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setCursor(12, 180);
-  tft.print(WIFI_SETUP_PASS);
+  tft.print(runtimeSetupApPass());
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -7478,7 +8307,7 @@ void startWiFiManager(bool forcePortal) {
   wifiManager.setConnectTimeout(30);
 
   if (!forcePortal) {
-    if (connectHardcodedWiFi(30000UL)) return;
+    if (connectConfiguredWiFi(30000UL)) return;
   }
 
   if (forcePortal) drawWiFiSetupScreen("Portale configurazione");
@@ -8117,16 +8946,149 @@ void addVedirectRawLine(const String& line) {
   appWatchdogLastVictronParserMs = millis();
 }
 
+
+String loadStateItalianLabel() {
+  String ls = loadState;
+  ls.toUpperCase();
+  if (ls == "ON") return "Accesa";
+  if (ls == "OFF") return "Spenta";
+  if (ls == "N/D" || ls.length() == 0) return "Non disponibile";
+  return loadState;
+}
+
+float loadPowerWatts() {
+  if (!isfinite(battV) || !isfinite(loadCurrentA)) return NAN;
+  if (battV <= 0.0f || loadCurrentA < 0.0f) return NAN;
+  return battV * loadCurrentA;
+}
+
+String vedirectBatteryLevelLabel() {
+  if (!isfinite(battV) || battV <= 0.0f) return "N/D";
+  float sys = configuredSystemVoltage();
+  float v12 = battV;
+  if (sys >= 47.0f) v12 = battV / 4.0f;
+  else if (sys >= 23.0f) v12 = battV / 2.0f;
+  if (v12 < 11.0f) return "Molto critica";
+  if (v12 < 11.5f) return "Critica";
+  if (v12 < 11.8f) return "Attenzione";
+  if (v12 < 12.0f) return "Bassa";
+  if (v12 < 12.3f) return "Media/bassa";
+  if (v12 < 12.6f) return "Buona";
+  return "Alta / in carica";
+}
+
+float vedirectBadLinePercent() {
+  uint32_t total = vedirectParsedLineCount + vedirectBadLineCount;
+  if (total == 0) return 0.0f;
+  return (100.0f * (float)vedirectBadLineCount) / (float)total;
+}
+
+String vedirectCommsQualityLabel() {
+  if (!victronOnline()) return "Offline / No Data";
+  float pct = vedirectBadLinePercent();
+  if (vedirectReinitCount > 0 && pct > 2.0f) return "Da controllare";
+  if (pct < 0.5f && vedirectReinitCount == 0) return "Ottima";
+  if (pct < 2.0f) return "Buona";
+  if (pct < 5.0f) return "Discreta";
+  return "Rumorosa";
+}
+
+String vedirectDecodedHtml() {
+  String html;
+  float lpw = loadPowerWatts();
+  String loadExtra = "Stato: " + loadStateItalianLabel();
+  loadExtra += "<br>Corrente LOAD: " + String(isfinite(loadCurrentA) ? loadCurrentA : 0.0f, 3) + " A";
+  loadExtra += "<br>Potenza LOAD stimata: " + String(isfinite(lpw) ? lpw : 0.0f, 2) + " W";
+  if (loadState == "OFF" && isfinite(battV) && battV < 11.8f) loadExtra += "<br><b>Possibile distacco per batteria bassa.</b>";
+
+  String battExtra = "Stato stimato: " + vedirectBatteryLevelLabel();
+  battExtra += "<br>Soglie 12V indicative: bassa &lt;12.0 V, attenzione &lt;11.8 V, critica &lt;11.5 V.";
+  if (isfinite(battV) && battV < 11.5f) battExtra += "<br><b>Ricaricare appena possibile.</b>";
+
+  String hist = "Oggi: " + String(isfinite(yieldTodayKWh) ? yieldTodayKWh : 0.0f, 2) + " kWh, P max " + String(isfinite(maxPowerToday) ? maxPowerToday : 0.0f, 0) + " W";
+  hist += "<br>Ieri: " + String(isfinite(yieldYesterdayKWh) ? yieldYesterdayKWh : 0.0f, 2) + " kWh, P max " + String(isfinite(maxPowerYesterday) ? maxPowerYesterday : 0.0f, 0) + " W";
+  hist += "<br>Totale Victron: " + String(isfinite(yieldTotalKWh) ? yieldTotalKWh : 0.0f, 2) + " kWh";
+  if (victronHistoryDaySequence >= 0) hist += "<br>HDS: " + String(victronHistoryDaySequence);
+
+  float badPct = vedirectBadLinePercent();
+  String comm = "Qualita': " + vedirectCommsQualityLabel();
+  comm += "<br>Righe OK: " + String(vedirectParsedLineCount);
+  comm += "<br>Righe scartate: " + String(vedirectBadLineCount) + " (" + String(badPct, 2) + "%)";
+  comm += "<br>Restart UART: " + String(vedirectReinitCount);
+
+  html += "<div class='grid'>";
+  html += card("Batteria Victron", isfinite(battV) ? String(battV, 2) + " V" : String("N/D"), battExtra);
+  html += card("Carica / PV", (isfinite(panelW) ? String(panelW, 0) : String("0")) + " W", "PV: " + String(isfinite(panelV) ? panelV : 0.0f, 2) + " V<br>Corrente carica: " + String(isfinite(battA) ? battA : 0.0f, 3) + " A<br>Stato: " + chargeStateItalianLabel(chargeState) + "<br>MPPT: " + mpptStateItalianLabel(mpptState) + "<br>Errore: " + esc(errorState));
+  html += card("Uscita LOAD", loadStateItalianLabel(), loadExtra);
+  html += card("Storico interno Victron", String(isfinite(yieldTodayKWh) ? yieldTodayKWh : 0.0f, 2) + " kWh oggi", hist);
+  html += card("Qualita' VE.Direct", vedirectCommsQualityLabel(), comm);
+  html += "</div>";
+  return html;
+}
+
+String vedirectDecodedJson() {
+  float lpw = loadPowerWatts();
+  float badPct = vedirectBadLinePercent();
+  String j = "{";
+  j += "\"online\":" + String(victronOnline() ? "true" : "false") + ",";
+  j += "\"battery_voltage\":" + String(isfinite(battV) ? battV : 0.0f, 3) + ",";
+  j += "\"battery_level_label\":\"" + jsonEsc(vedirectBatteryLevelLabel()) + "\",";
+  j += "\"charge_current\":" + String(isfinite(battA) ? battA : 0.0f, 3) + ",";
+  j += "\"charge_power\":" + String(isfinite(battW) ? battW : 0.0f, 2) + ",";
+  j += "\"panel_voltage\":" + String(isfinite(panelV) ? panelV : 0.0f, 3) + ",";
+  j += "\"panel_power\":" + String(isfinite(panelW) ? panelW : 0.0f, 1) + ",";
+  j += "\"charge_state\":\"" + jsonEsc(chargeState) + "\",";
+  j += "\"charge_state_label\":\"" + jsonEsc(chargeStateItalianLabel(chargeState)) + "\",";
+  j += "\"mppt_state\":\"" + jsonEsc(mpptState) + "\",";
+  j += "\"mppt_state_label\":\"" + jsonEsc(mpptStateItalianLabel(mpptState)) + "\",";
+  j += "\"error\":\"" + jsonEsc(errorState) + "\",";
+  j += "\"load_state\":\"" + jsonEsc(loadState) + "\",";
+  j += "\"load_state_label\":\"" + jsonEsc(loadStateItalianLabel()) + "\",";
+  j += "\"load_current_a\":" + String(isfinite(loadCurrentA) ? loadCurrentA : 0.0f, 3) + ",";
+  j += "\"load_power_w\":" + String(isfinite(lpw) ? lpw : 0.0f, 2) + ",";
+  j += "\"yield_today_kwh\":" + String(isfinite(yieldTodayKWh) ? yieldTodayKWh : 0.0f, 3) + ",";
+  j += "\"yield_yesterday_kwh\":" + String(isfinite(yieldYesterdayKWh) ? yieldYesterdayKWh : 0.0f, 3) + ",";
+  j += "\"yield_total_kwh\":" + String(isfinite(yieldTotalKWh) ? yieldTotalKWh : 0.0f, 3) + ",";
+  j += "\"max_power_today_w\":" + String(isfinite(maxPowerToday) ? maxPowerToday : 0.0f, 0) + ",";
+  j += "\"max_power_yesterday_w\":" + String(isfinite(maxPowerYesterday) ? maxPowerYesterday : 0.0f, 0) + ",";
+  j += "\"hds\":" + String(victronHistoryDaySequence) + ",";
+  j += "\"vedirect_quality\":\"" + jsonEsc(vedirectCommsQualityLabel()) + "\",";
+  j += "\"parsed_lines\":" + String(vedirectParsedLineCount) + ",";
+  j += "\"bad_lines\":" + String(vedirectBadLineCount) + ",";
+  j += "\"bad_line_percent\":" + String(badPct, 3) + ",";
+  j += "\"uart_restarts\":" + String(vedirectReinitCount);
+  j += "}";
+  return j;
+}
+
+void handleLoadMonitorPage() {
+  if (!requireAuth()) return;
+  String html = htmlHeader("Monitor LOAD");
+  html += "<div class='top'><h1>Monitor LOAD / Carico</h1><div class='sub'>Consumo sull'uscita carico Victron, se il regolatore espone IL via VE.Direct.</div><div class='nav'><a href='/'>Dashboard</a><a href='/vedirect-raw'>VE.Direct RAW</a><a href='/load-monitor.json'>JSON</a></div></div>";
+  html += vedirectDecodedHtml();
+  html += "<div class='card'><div class='t'>Nota</div><p>Se IL resta 0, il carico e' spento oppure il modello non misura corrente LOAD. Con buck/ESP collegati a LOAD puoi verificare se il ramo carico fa scendere la batteria.</p></div>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleLoadMonitorJson() {
+  if (!requireAuth()) return;
+  server.sendHeader("Cache-Control", "no-store, max-age=0");
+  sendJsonPretty(vedirectDecodedJson());
+}
+
 void handleVedirectRawPage() {
   if (!requireAuth()) return;
   String html = htmlHeader("VE.Direct RAW");
-  html += "<div class='top'><h1>VE.Direct RAW</h1><div class='sub'>Ultime righe ricevute dal Victron, utili per debug cavo e parser.</div><div class='nav'><a href='/'>Dashboard</a><a href='/victron-data'>Dati convertiti</a><a href='/vedirect-raw.json'>JSON</a><a href='/vedirect-restart'>Riavvia UART</a></div></div>";
+  html += "<div class='top'><h1>VE.Direct RAW</h1><div class='sub'>Ultime righe ricevute dal Victron, utili per debug cavo e parser.</div><div class='nav'><a href='/'>Dashboard</a><a href='/victron-data'>Dati convertiti</a><a href='/vedirect-raw.json'>JSON</a><a href='/load-monitor'>LOAD</a><a href='/vedirect-decode.json'>Decode JSON</a><a href='/vedirect-restart'>Riavvia UART</a></div></div>";
   html += "<div class='grid'>";
   html += card("Stato", victronOnline()?"Online":"No Data", "Ultima riga: " + String((millis()-lastVictronMs)/1000UL) + " s fa");
   html += card("Porta", String(VICTRON_PORT_NAME), String(VICTRON_PORT_DETAIL));
   html += card("Diagnostica UART", String(vedirectByteCount) + " byte", "Righe OK: " + String(vedirectParsedLineCount) + "<br>Righe scartate: " + String(vedirectBadLineCount) + "<br>Ultimo byte: " + String(lastVictronByteMs ? (millis()-lastVictronByteMs)/1000UL : 999999UL) + " s fa<br>Restart UART: " + String(vedirectReinitCount) + "<br>Motivo: " + esc(lastVictronReinitReason));
   html += card("Ultima riga", esc(lastRawLine), "Raw parser");
-  html += "</div><div class='card'><pre style='white-space:pre-wrap;max-height:420px;overflow:auto'>";
+  html += "</div>";
+  html += vedirectDecodedHtml();
+  html += "<div class='card'><div class='t'>RAW VE.Direct</div><pre style='white-space:pre-wrap;max-height:420px;overflow:auto'>";
   for (int i=0;i<vedirectRawStored;i++) { int idx = (vedirectRawPos - vedirectRawStored + i + VEDIRECT_RAW_COUNT) % VEDIRECT_RAW_COUNT; html += esc(vedirectRawRing[idx]) + "\n"; }
   html += "</pre></div>" + String("</body></html>");
   server.send(200, "text/html", html);
@@ -8135,7 +9097,8 @@ void handleVedirectRawPage() {
 void handleVedirectRawJson() {
   if (!requireAuth()) return;
   server.sendHeader("Cache-Control", "no-store, max-age=0");
-  String j = "{\"online\":" + String(victronOnline()?"true":"false") + ",\"last_seconds\":" + String((millis()-lastVictronMs)/1000UL) + ",\"last_byte_seconds\":" + String(lastVictronByteMs ? (millis()-lastVictronByteMs)/1000UL : 999999UL) + ",\"port\":\"" + String(VICTRON_PORT_NAME) + "\",\"rx_gpio\":" + String(VICTRON_RX) + ",\"tx_enabled\":" + String(VICTRON_TX >= 0 ? "true" : "false") + ",\"baud\":" + String(VICTRON_BAUD) + ",\"bytes\":" + String(vedirectByteCount) + ",\"parsed_lines\":" + String(vedirectParsedLineCount) + ",\"bad_lines\":" + String(vedirectBadLineCount) + ",\"uart_restarts\":" + String(vedirectReinitCount) + ",\"lines\":[";
+  String decoded = vedirectDecodedJson();
+  String j = "{\"online\":" + String(victronOnline()?"true":"false") + ",\"last_seconds\":" + String((millis()-lastVictronMs)/1000UL) + ",\"last_byte_seconds\":" + String(lastVictronByteMs ? (millis()-lastVictronByteMs)/1000UL : 999999UL) + ",\"port\":\"" + String(VICTRON_PORT_NAME) + "\",\"rx_gpio\":" + String(pubCfg.veDirectRxPin) + ",\"tx_enabled\":" + String(VICTRON_TX >= 0 ? "true" : "false") + ",\"baud\":" + String(VICTRON_BAUD) + ",\"bytes\":" + String(vedirectByteCount) + ",\"parsed_lines\":" + String(vedirectParsedLineCount) + ",\"bad_lines\":" + String(vedirectBadLineCount) + ",\"uart_restarts\":" + String(vedirectReinitCount) + ",\"decoded\":" + decoded + ",\"lines\":[";
   for (int i=0;i<vedirectRawStored;i++) { int idx=(vedirectRawPos-vedirectRawStored+i+VEDIRECT_RAW_COUNT)%VEDIRECT_RAW_COUNT; String l=vedirectRawRing[idx]; l.replace("\\","\\\\"); l.replace("\"","\\\""); if(i) j+=","; j += "\""+l+"\""; }
   j += "]}";
   sendJsonPretty(j);
@@ -8167,7 +9130,7 @@ void handleNetworkJson() {
   server.sendHeader("Cache-Control", "no-store, max-age=0");
   String j = "{";
   j += "\"firmware\":\"" + String(FW_VERSION) + "\",";
-  j += "\"hostname\":\"" + String(HOSTNAME) + "\",";
+  j += "\"hostname\":\"" + runtimeHostname() + "\",";
   j += "\"ssid\":\"" + esc(WiFi.SSID()) + "\",";
   j += "\"status\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "offline") + "\",";
   j += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
@@ -8189,7 +9152,7 @@ void handleQuickCheckPage() {
   html += "<div class='top'><h1>Diagnosi rapida</h1><div class='sub'>Controllo immediato dello stato essenziale del monitor.</div><div class='nav'><a href='/'>Dashboard</a><a href='/network'>Rete/IP</a><a href='/vedirect-raw'>VE.Direct RAW</a><a href='/battery'>Batteria ESP</a></div></div>";
   html += "<div class='grid'>";
   html += card("VE.Direct", victronOnline()?"Online":"No Data", String(VICTRON_PORT_NAME) + "<br>Ultimo dato: " + String(victronSeen ? ((millis()-lastVictronMs)/1000UL) : 0) + " s fa");
-  html += card("Batteria ESP", String(isnan(ep)?0:ep,0) + "%", String(isnan(espBatteryVoltage())?0:espBatteryVoltage(),2) + " V su GPIO34");
+  html += card("Batteria ESP", String(isnan(ep)?0:ep,0) + "%", String(isnan(espBatteryVoltage())?0:espBatteryVoltage(),2) + " V su GPIO" + String(pubCfg.espBatteryAdcPin));
   html += card("WiFi", String(WiFi.RSSI()) + " dBm", "IP: " + WiFi.localIP().toString() + "<br>MAC: " + WiFi.macAddress());
   html += card("Impianto", String(configuredPanelWatts(),0) + " W pannello", plantInfoSummary());
   html += card("SD", sdMounted?"Montata":"Non montata", sdMounted?("Libera: " + formatBytes64(SD.totalBytes()-SD.usedBytes())):esc(sdLastStatus));
@@ -8202,11 +9165,11 @@ void handleNetworkPage() {
   if (!requireAuth()) return;
   String html = htmlHeader("Rete / IP");
   html += "<div class='top'><h1>Rete / IP</h1><div class='sub'>Stato WiFi, MAC address e istruzioni per bloccare l'IP dal router.</div>";
-  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/settings'>Settings</a><a href='/network.json'>JSON rete</a><a href='/info'>Info</a></div></div>";
+  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/settings'>Settings</a><a href='/wifi'>WiFi Manager</a><a href='/network.json'>JSON rete</a><a href='/info'>Info</a></div></div>";
   html += "<div class='grid'>";
   html += card("IP attuale", WiFi.localIP().toString(), "Se il router si riavvia puo' cambiare se non e' prenotato.");
   html += card("MAC address", WiFi.macAddress(), "Usalo nel router per prenotazione DHCP / static lease.");
-  html += card("Hostname", String(HOSTNAME), "Prova anche: http://" + String(HOSTNAME) + ".local se mDNS e' disponibile.");
+  html += card("Hostname", runtimeHostname(), "Prova anche: http://" + runtimeHostname() + ".local se mDNS e' disponibile.");
   html += card("Segnale WiFi", String(WiFi.RSSI()) + " dBm", "Qualita': " + wifiBadgeClass(WiFi.RSSI()) + "<br>SSID: " + esc(WiFi.SSID()));
   html += card("Gateway / DNS", WiFi.gatewayIP().toString(), "DNS: " + WiFi.dnsIP().toString() + "<br>Subnet: " + WiFi.subnetMask().toString());
   html += "</div>";
@@ -8216,13 +9179,179 @@ void handleNetworkPage() {
   html += "<p class='e'>Meglio farlo dal router invece che mettere IP statico nel firmware, cosi' WiFiManager resta flessibile se cambi rete.</p>";
   html += "</div>";
   html += "<div class='card'><div class='t'>Link rapidi</div>";
-  html += "<p><a class='button' href='/api/v1'>API v1</a> <a class='button' href='/json'>JSON live</a> <a class='button' href='/vedirect-raw'>VE.Direct RAW</a> <a class='button' href='/battery.json'>Batteria ESP JSON</a></p>";
+  html += "<p><a class='button' href='/wifi'>WiFi Manager Pro</a> <a class='button' href='/api/v1'>API v1</a> <a class='button' href='/json'>JSON live</a> <a class='button' href='/vedirect-raw'>VE.Direct RAW</a> <a class='button' href='/battery.json'>Batteria ESP JSON</a></p>";
   html += "</div>";
   html += String("</body></html>");
   server.send(200, "text/html; charset=utf-8", html);
 }
 
-void handleApiV1Index(){ if(!requireAuth()) return; String h=htmlHeader("API v1"); h += "<div class='top'><h1>API REST v1</h1><div class='sub'>Endpoint JSON ordinati per integrazioni esterne.</div><div class='nav'><a href='/'>Dashboard</a><a href='/network'>Rete</a><a href='/json'>JSON live</a><a href='/vedirect-raw'>VE.Direct RAW</a></div></div><div class='card'><pre>/api/v1/status\n/api/v1/power\n/api/v1/victron\n/api/v1/battery\n/api/v1/sd\n/api/v1/alerts\n/api/v1/health\n/api/v1/config\n/network.json</pre></div>" + String("</body></html>"); server.send(200,"text/html",h); }
+
+String wifiScanRowsHtml(int &countOut) {
+  countOut = 0;
+  String rows;
+  WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks(false, true);
+  if (n <= 0) return "<tr><td colspan='5'>Nessuna rete trovata. Riprova o avvicina la CYD al router/repeater.</td></tr>";
+  countOut = n;
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    int ch = WiFi.channel(i);
+    String sec = wifiSecurityText(WiFi.encryptionType(i));
+    String q = wifiQualityText(rssi);
+    rows += "<tr>";
+    rows += "<td><button class='button small' type='button' onclick=\"pickWifiById(" + String(i) + ")\">Scegli</button><input type='hidden' id='ssid_" + String(i) + "' value='" + esc(ssid) + "'></td>";
+    rows += "<td><b>" + esc(ssid) + "</b></td>";
+    rows += "<td>" + String(rssi) + " dBm<br><span class='e'>" + q + "</span></td>";
+    rows += "<td>" + String(ch) + "</td>";
+    rows += "<td>" + sec + "</td>";
+    rows += "</tr>";
+  }
+  WiFi.scanDelete();
+  return rows;
+}
+
+void handleWifiManagerProPage() {
+  if (!requireAuth()) return;
+  bool doScan = server.hasArg("scan");
+  int count = 0;
+  String rows = doScan ? wifiScanRowsHtml(count) : "";
+
+  prefs.begin("victron", true);
+  String lastErr = prefs.getString("wifi_last_error", "Nessun errore salvato");
+  String lastOkSsid = prefs.getString("wifi_last_ok_ssid", "N/D");
+  String lastOkIp = prefs.getString("wifi_last_ok_ip", "N/D");
+  int lastOkRssi = prefs.getInt("wifi_last_ok_rssi", 0);
+  prefs.end();
+
+  String html = htmlHeader("WiFi Manager Pro");
+  html += "<style>";
+  html += ".wifiHero{background:linear-gradient(135deg,#0b3d52,#111827);border:1px solid #21465a;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 8px 26px rgba(0,0,0,.24)}";
+  html += ".wifiForm input{width:100%;box-sizing:border-box;border:1px solid #334155;background:#0b1220;color:#e6edf3;border-radius:12px;padding:13px;font-size:16px;margin:6px 0 12px}";
+  html += ".wifiForm label{display:block;color:#9fb3c8;font-size:13px;margin-top:8px}.small{padding:7px 10px;font-size:13px}.mutedBox{background:#09111d;border:1px solid #263445;border-radius:12px;padding:10px;margin-top:10px}.dangerBtn{background:#7f1d1d!important}.warnDot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#f97316;margin-right:6px}";
+  html += "</style>";
+  html += "<div class='top'><h1>WiFi Manager Pro</h1><div class='sub'>Scansione reti, scelta SSID e password con tastiera mobile. Se la nuova rete fallisce, resta disponibile fallback precedente/AP Victron-ESP32-Setup.</div>";
+  html += "<div class='nav'><a href='/'>Dashboard</a><a href='/network'>Rete/IP</a><a href='/wifi.json'>JSON WiFi</a><a href='/settings'>Settings</a></div></div>";
+
+  html += "<div class='grid'>";
+  html += card("Rete attuale", WiFi.SSID(), "IP: " + WiFi.localIP().toString() + "<br>RSSI: " + String(WiFi.RSSI()) + " dBm - " + wifiQualityText(WiFi.RSSI()) + "<br>Canale: " + String(WiFi.channel()));
+  html += card("Configurazione attiva", wifiCustomEnabled()?"WebUI custom":"Default firmware", "SSID configurato: " + esc(wifiConfiguredSsid()) + "<br>Fallback AP: " + runtimeSetupApSsid());
+  html += card("Ultima connessione OK", lastOkSsid, "IP: " + lastOkIp + "<br>RSSI: " + String(lastOkRssi) + " dBm");
+  html += card("Ultimo errore WiFi", lastErr, "Se sbagli password, al riavvio tenta fallback rete precedente.");
+  html += "</div>";
+
+  html += "<div class='wifiHero'><h2>Cambia rete WiFi</h2>";
+  html += "<p><a class='button' href='/wifi?scan=1'>Scansiona reti WiFi</a> <a class='button' href='/wifi-portal'>Apri portale configurazione</a></p>";
+  if (doScan) {
+    html += "<p class='e'>Reti trovate: " + String(count) + ". Tocca <b>Scegli</b> per compilare automaticamente SSID.</p>";
+    html += "<table><tr><th></th><th>SSID</th><th>Segnale</th><th>Canale</th><th>Sicurezza</th></tr>" + rows + "</table>";
+  } else {
+    html += "<p class='e'>Premi <b>Scansiona reti WiFi</b> per vedere RSSI, canale e sicurezza delle reti vicine.</p>";
+  }
+  html += "<form class='wifiForm' method='POST' action='/wifi-save' onsubmit=\"return confirm('Salvare questa rete e riavviare la connessione? Se la password e sbagliata, la CYD tentera il fallback.');\">";
+  html += "<label>SSID selezionato</label><input id='wifiSsid' name='ssid' autocomplete='username' autocapitalize='none' spellcheck='false' placeholder='Nome rete WiFi 2.4 GHz' value='" + esc(wifiConfiguredSsid()) + "'>";
+  html += "<label>Password rete</label><input id='wifiPass' name='pass' type='password' autocomplete='current-password' autocapitalize='none' spellcheck='false' placeholder='Password WiFi, lascia vuoto solo per rete aperta'>";
+  html += "<p><button class='button' type='button' onclick=\"togglePass()\">Mostra/Nascondi password</button> <button class='button' type='button' onclick=\"document.getElementById('wifiPass').value=''\">Cancella password</button></p>";
+  html += "<p><button class='button' type='submit'>Salva e prova connessione</button> <a class='button' href='/wifi'>Annulla</a></p>";
+  html += "</form>";
+  html += "<div class='mutedBox'><span class='warnDot'></span><b>Sicurezza anti-perdita:</b> se la nuova rete non funziona, la CYD prova la rete precedente/default. Se fallisce tutto, AP <b>" + runtimeSetupApSsid() + "</b> password <b>" + runtimeSetupApPass() + "</b>.</div>";
+  html += "</div>";
+  html += "<div class='card'><div class='t'>Azioni di recupero</div><p><a class='button' href='/wifi?scan=1'>Riscansiona</a> <a class='button' href='/offline-ap'>Info AP fallback</a> <a class='button dangerBtn' href='/wifi-clear' onclick=\"return confirm('Cancellare la rete salvata dalla WebUI e riavviare?');\">Dimentica rete WebUI</a></p></div>";
+  html += "<script>function pickWifiById(i){var e=document.getElementById('ssid_'+i);if(e){document.getElementById('wifiSsid').value=e.value;document.getElementById('wifiPass').focus();}}function togglePass(){var p=document.getElementById('wifiPass');p.type=(p.type==='password')?'text':'password';p.focus();}</script>";
+  html += String("</body></html>");
+  server.send(200, "text/html; charset=utf-8", html);
+}
+
+void handleWifiManagerProSave() {
+  if (!requireAuth()) return;
+  String ssid = server.arg("ssid");
+  String pass = server.arg("pass");
+  ssid.trim();
+  if (ssid.length() < 1 || ssid.length() > 32) {
+    sendActionPage("WiFi Manager Pro", "SSID non valido. Inserisci un nome rete valido.", 3, "/wifi?scan=1");
+    return;
+  }
+  if (pass.length() > 64) pass = pass.substring(0, 64);
+  prefs.begin("victron", false);
+  prefs.putBool("wifi_custom", true);
+  prefs.putString("wifi_ssid", ssid);
+  prefs.putString("wifi_pass", pass);
+  prefs.putString("wifi_last_error", "Nuova rete salvata da WebUI. Riavvio connessione in corso.");
+  prefs.end();
+  addEventLog("WIFI", "Nuova rete salvata da WebUI: " + ssid);
+  String html = htmlHeader("WiFi salvato");
+  html += "<meta http-equiv='refresh' content='18;url=/wifi'>";
+  html += "<div class='top'><h1>WiFi salvato</h1><div class='sub'>La CYD prova la nuova rete. Se non riesce, usera' fallback automatico.</div></div>";
+  html += "<div class='card'><div class='v'>" + esc(ssid) + "</div><p>Attendi 20-60 secondi. Se l'IP cambia, cerca il dispositivo nel router o usa il portale <b>" + runtimeSetupApSsid() + "</b>.</p><p><a class='button' href='/wifi'>Torna a WiFi Manager</a></p></div></body></html>";
+  server.send(200, "text/html; charset=utf-8", html);
+  delay(800);
+  WiFi.disconnect(true, false);
+  delay(300);
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(runtimeHostname().c_str());
+  WiFi.begin(ssid.c_str(), pass.c_str());
+}
+
+void handleWifiManagerProClear() {
+  if (!requireAuth()) return;
+  prefs.begin("victron", false);
+  prefs.putBool("wifi_custom", false);
+  prefs.remove("wifi_ssid");
+  prefs.remove("wifi_pass");
+  prefs.putString("wifi_last_error", "Rete WebUI dimenticata. Uso default/fallback.");
+  prefs.end();
+  addEventLog("WIFI", "Rete WebUI dimenticata");
+  sendActionPage("WiFi Manager Pro", "Rete salvata dalla WebUI cancellata. Riavvio in corso.", 8, "/wifi");
+  delay(1000);
+  cleanRestartNow("wifi_clear");
+}
+
+void handleWifiPortalStart() {
+  if (!requireAuth()) return;
+  forceWifiPortalAtBoot = true;
+  prefs.begin("victron", false);
+  prefs.putBool("force_wifi_portal", true);
+  prefs.end();
+  sendActionPage("Portale WiFi", "Riavvio in modalita AP Victron-ESP32-Setup. Password: 12345678", 10, "http://192.168.4.1");
+  delay(1200);
+  cleanRestartNow("wifi_portal");
+}
+
+void handleWifiManagerProJson() {
+  if (!requireAuth()) return;
+  String j = "{";
+  j += "\"firmware\":\"" + jsonEsc(FW_VERSION) + "\",";
+  j += "\"current_ssid\":\"" + jsonEsc(WiFi.SSID()) + "\",";
+  j += "\"configured_ssid\":\"" + jsonEsc(wifiConfiguredSsid()) + "\",";
+  j += "\"custom_enabled\":" + String(wifiCustomEnabled()?"true":"false") + ",";
+  j += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  j += "\"mac\":\"" + WiFi.macAddress() + "\",";
+  j += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+  j += "\"quality\":\"" + wifiQualityText(WiFi.RSSI()) + "\",";
+  j += "\"channel\":" + String(WiFi.channel()) + ",";
+  j += "\"fallback_ap\":\"" + runtimeSetupApSsid() + "\"";
+  if (server.hasArg("scan")) {
+    WiFi.mode(WIFI_STA);
+    int n = WiFi.scanNetworks(false, true);
+    j += ",\"networks\":[";
+    for (int i=0; i<n; i++) {
+      if (i) j += ",";
+      j += "{";
+      j += "\"ssid\":\"" + jsonEsc(WiFi.SSID(i)) + "\",";
+      j += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+      j += "\"quality\":\"" + wifiQualityText(WiFi.RSSI(i)) + "\",";
+      j += "\"channel\":" + String(WiFi.channel(i)) + ",";
+      j += "\"security\":\"" + wifiSecurityText(WiFi.encryptionType(i)) + "\"";
+      j += "}";
+    }
+    j += "]";
+    WiFi.scanDelete();
+  }
+  j += "}";
+  sendJsonPretty(j);
+}
+
+void handleApiV1Index(){ if(!requireAuth()) return; String h=htmlHeader("API v1"); h += "<div class='top'><h1>API REST v1</h1><div class='sub'>Endpoint JSON ordinati per integrazioni esterne.</div><div class='nav'><a href='/'>Dashboard</a><a href='/network'>Rete</a><a href='/json'>JSON live</a><a href='/vedirect-raw'>VE.Direct RAW</a></div></div><div class='card'><pre>/api/v1/status\n/api/v1/power\n/api/v1/victron\n/load-monitor.json\n/api/v1/battery\n/api/v1/sd\n/api/v1/alerts\n/api/v1/health\n/api/v1/config\n/network.json</pre></div>" + String("</body></html>"); server.send(200,"text/html",h); }
 void handleApiV1Status(){ if(!requireAuth()) return; sendJsonPretty(apiStatusJson()); }
 void handleApiV1Power(){ if(!requireAuth()) return; sendJsonPretty("{\"reset_reason\":\""+esc(resetReasonText())+"\",\"boot_count\":"+String(bootCounter)+",\"esp_battery_v\":"+String(isnan(espBatteryVoltage())?0:espBatteryVoltage(),3)+",\"esp_battery_pct\":"+String(isnan(espBatteryPercent())?0:espBatteryPercent(),0)+"}"); }
 void handleApiV1Victron(){ if(!requireAuth()) return; handleJson(); }
@@ -8271,7 +9400,7 @@ void handleOfflineApPage() {
   if (!requireAuth()) return;
   String html = htmlHeader("Offline / AP Setup");
   html += "<div class='top'><h1>Modalita' offline / AP</h1><div class='sub'>Cosa succede se il WiFi non e' disponibile.</div><div class='nav'><a href='/'>Dashboard</a><a href='/settings'>Settings</a></div></div>";
-  html += "<div class='card'><div class='t'>Fallback AP</div><div class='v'>" + String(WIFI_SETUP_AP) + "</div><p>Password: <b>" + String(WIFI_SETUP_PASS) + "</b></p><p>Se la rete principale non viene trovata, WiFiManager apre il portale di configurazione per 180 secondi.</p></div>";
+  html += "<div class='card'><div class='t'>Fallback AP</div><div class='v'>" + runtimeSetupApSsid() + "</div><p>Password: <b>" + runtimeSetupApPass() + "</b></p><p>Se la rete principale non viene trovata, WiFiManager apre il portale di configurazione per 180 secondi.</p></div>";
   html += "<div class='card'><div class='t'>Stato attuale</div><p>WiFi: " + String(WiFi.status()==WL_CONNECTED?"Connesso":"Offline") + "<br>IP: " + WiFi.localIP().toString() + "</p></div>" + String("</body></html>");
   server.send(200,"text/html",html);
 }
@@ -8332,6 +9461,305 @@ void setupBackupRetention5x5Defaults() {
   prefs.end();
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V10.4.85 Battery Health Pro
+// Analisi non invasiva della scarica dopo Float/Mantenimento.
+// Non sostituisce un test capacita' professionale: usa tensione, stato carica,
+// corrente LOAD se disponibile e andamento nel tempo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool bhVoltageValid(float v) {
+  return isfinite(v) && v > 9.0f && v < 16.5f;
+}
+
+bool bhIsFloatState() {
+  return chargeState == "Float" || chargeState == "Mantenimento";
+}
+
+bool bhIsChargingState() {
+  return chargeState == "Bulk" || chargeState == "Absorption" || chargeState == "Assorbimento" || bhIsFloatState();
+}
+
+String bhFmtV(float v) {
+  if (!isfinite(v)) return "N/D";
+  return String(v, 2) + " V";
+}
+
+String bhFmtDrop(float v) {
+  if (!isfinite(v)) return "N/D";
+  return String(v, 2) + " V";
+}
+
+String bhFmtSampleJson() {
+  String j = "[";
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) {
+    if (i) j += ",";
+    j += "{\"minutes\":" + String(BH_SAMPLE_MINUTES[i]) + ",\"voltage\":";
+    if (isfinite(bhSamples[i])) j += String(bhSamples[i], 3);
+    else j += "null";
+    j += "}";
+  }
+  j += "]";
+  return j;
+}
+
+void bhResetSamples() {
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) bhSamples[i] = NAN;
+  bhNextSampleIndex = 0;
+}
+
+void batteryHealthSave() {
+  Preferences p;
+  if (!p.begin("bathealth", false)) return;
+  p.putBool("active", bhSessionActive);
+  p.putBool("sawFloat", bhSawStableFloat);
+  p.putString("lastFloatT", bhLastFloatTime);
+  p.putFloat("lastFloatV", bhLastFloatV);
+  p.putString("startT", bhSessionStartTime);
+  p.putFloat("startV", bhStartV);
+  p.putFloat("minV", bhMinV);
+  p.putString("doneT", bhLastCompletedTime);
+  p.putString("verdict", bhLastVerdict);
+  p.putString("reason", bhLastReason);
+  p.putFloat("drop1h", bhLastDrop1h);
+  p.putFloat("drop4h", bhLastDrop4h);
+  p.putUInt("cycles", bhCompletedCycles);
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) p.putFloat((String("s") + i).c_str(), bhSamples[i]);
+  p.end();
+}
+
+void batteryHealthLoad() {
+  Preferences p;
+  if (!p.begin("bathealth", true)) return;
+  bhSessionActive = p.getBool("active", false);
+  bhSawStableFloat = p.getBool("sawFloat", false);
+  bhLastFloatTime = p.getString("lastFloatT", "N/D");
+  bhLastFloatV = p.getFloat("lastFloatV", NAN);
+  bhSessionStartTime = p.getString("startT", "N/D");
+  bhStartV = p.getFloat("startV", NAN);
+  bhMinV = p.getFloat("minV", NAN);
+  bhLastCompletedTime = p.getString("doneT", "N/D");
+  bhLastVerdict = p.getString("verdict", "Dati insufficienti");
+  bhLastReason = p.getString("reason", "Attendere un ciclo Float -> scarica.");
+  bhLastDrop1h = p.getFloat("drop1h", NAN);
+  bhLastDrop4h = p.getFloat("drop4h", NAN);
+  bhCompletedCycles = p.getUInt("cycles", 0);
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) bhSamples[i] = p.getFloat((String("s") + i).c_str(), NAN);
+  p.end();
+  // Dopo un reboot non possiamo ricostruire millis(): teniamo i dati diagnostici,
+  // ma ripartiamo con una nuova sessione quando rileveremo di nuovo fine Float.
+  bhSessionActive = false;
+  bhSessionStartMs = 0;
+  bhNextSampleIndex = 0;
+}
+
+void bhAppendCycleCsv() {
+  if (!LittleFS.begin(true)) return;
+  File f = LittleFS.open("/battery_health.csv", FILE_APPEND);
+  if (!f) return;
+  if (f.size() == 0) {
+    f.println("time,start_v,v5m,v15m,v30m,v60m,v120m,v240m,min_v,drop_1h,drop_4h,verdict,reason");
+  }
+  f.print(csvEscape(bhLastCompletedTime)); f.print(",");
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) {
+    if (isfinite(bhSamples[i])) f.print(String(bhSamples[i], 3));
+    f.print(",");
+  }
+  if (isfinite(bhMinV)) f.print(String(bhMinV, 3));
+  f.print(",");
+  if (isfinite(bhLastDrop1h)) f.print(String(bhLastDrop1h, 3));
+  f.print(",");
+  if (isfinite(bhLastDrop4h)) f.print(String(bhLastDrop4h, 3));
+  f.print(",");
+  f.print(csvEscape(bhLastVerdict)); f.print(",");
+  f.println(csvEscape(bhLastReason));
+  f.close();
+}
+
+void bhEvaluateSession(bool finalEval) {
+  float ref = NAN;
+  if (isfinite(bhSamples[2])) ref = bhSamples[2];       // 15 min: dopo assestamento iniziale
+  else if (isfinite(bhSamples[1])) ref = bhSamples[1];  // 5 min
+  else if (isfinite(bhSamples[0])) ref = bhSamples[0];
+
+  bhLastDrop1h = (isfinite(ref) && isfinite(bhSamples[4])) ? (ref - bhSamples[4]) : NAN;
+  bhLastDrop4h = (isfinite(ref) && isfinite(bhSamples[6])) ? (ref - bhSamples[6]) : NAN;
+
+  String loadNote = "";
+  if (isfinite(loadCurrentA) && loadCurrentA > 0.50f) loadNote = " Possibile carico elevato su LOAD.";
+
+  if (!isfinite(ref)) {
+    bhLastVerdict = "Dati insufficienti";
+    bhLastReason = "Serve almeno una lettura dopo la fine del Float.";
+    return;
+  }
+
+  float minV = isfinite(bhMinV) ? bhMinV : ref;
+  if (minV < 11.80f || (isfinite(bhLastDrop1h) && bhLastDrop1h > 0.55f)) {
+    bhLastVerdict = "Critica / molto sospetta";
+    bhLastReason = "Caduta tensione rapida o minima molto bassa dopo mantenimento." + loadNote;
+  } else if (minV < 12.15f || (isfinite(bhLastDrop1h) && bhLastDrop1h > 0.35f)) {
+    bhLastVerdict = "Da controllare";
+    bhLastReason = "La tensione scende abbastanza rapidamente dopo il Float." + loadNote;
+  } else if (minV < 12.35f || (isfinite(bhLastDrop4h) && bhLastDrop4h > 0.45f)) {
+    bhLastVerdict = "Discreta / monitorare";
+    bhLastReason = "Scarica non critica, ma conviene confrontare piu' cicli." + loadNote;
+  } else if (isfinite(bhSamples[4]) || finalEval) {
+    bhLastVerdict = "Buona";
+    bhLastReason = "Scarica lenta dopo Float. Nessun crollo evidente." + loadNote;
+  } else {
+    bhLastVerdict = "In osservazione";
+    bhLastReason = "Sessione avviata. Attendere 1-4 ore per una stima affidabile.";
+  }
+}
+
+void bhStartSession(float v) {
+  bhResetSamples();
+  bhSessionActive = true;
+  bhSessionStartMs = millis();
+  bhSessionStartTime = timeText();
+  bhStartV = v;
+  bhMinV = v;
+  bhSamples[0] = v;
+  bhNextSampleIndex = 1;
+  bhLastVerdict = "In osservazione";
+  bhLastReason = "Fine Float rilevata. Sto misurando la curva di scarica.";
+  addEventLog("BAT_HEALTH", "Avvio analisi post-Float V=" + String(v, 2));
+  batteryHealthSave();
+}
+
+void bhCompleteSession(const String& reason) {
+  if (!bhSessionActive) return;
+  bhSessionActive = false;
+  bhLastCompletedTime = timeText();
+  bhEvaluateSession(true);
+  bhCompletedCycles++;
+  addEventLog("BAT_HEALTH", "Fine analisi: " + bhLastVerdict + " - " + reason);
+  bhAppendCycleCsv();
+  batteryHealthSave();
+}
+
+void batteryHealthLoop() {
+  unsigned long now = millis();
+  if (now - bhLastLoopMs < 5000UL) return;
+  bhLastLoopMs = now;
+
+  if (!victronOnline() || !bhVoltageValid(battV)) return;
+
+  if (!isfinite(bhMinV) || battV < bhMinV) bhMinV = battV;
+
+  if (bhIsFloatState()) {
+    if (bhFloatStableSinceMs == 0) bhFloatStableSinceMs = now;
+    bhLastFloatV = battV;
+    bhLastFloatTime = timeText();
+    if (now - bhFloatStableSinceMs > 5UL * 60UL * 1000UL) bhSawStableFloat = true;
+    // Se torna in Float mentre una sessione era attiva, chiudiamo la sessione precedente.
+    if (bhSessionActive && now - bhSessionStartMs > 10UL * 60UL * 1000UL) bhCompleteSession("ritorno_float");
+  } else {
+    bhFloatStableSinceMs = 0;
+  }
+
+  bool leftFloat = (bhPreviousChargeState == "Float" || bhPreviousChargeState == "Mantenimento") && !bhIsFloatState();
+  bool looksLikeDischarge = (!bhIsChargingState()) || (isfinite(panelW) && panelW < 2.0f && isfinite(battA) && battA < 0.10f);
+  // Alcuni Victron possono restare formalmente in Float anche quando il sole cala.
+  // Se la tensione scende chiaramente sotto il livello di mantenimento e PV e' quasi zero,
+  // consideriamo iniziata la fase post-mantenimento.
+  bool floatNoLongerHolding = bhIsFloatState() && bhSawStableFloat && isfinite(bhLastFloatV) &&
+                              bhLastFloatV > 13.20f && battV < (bhLastFloatV - 0.25f) &&
+                              (!isfinite(panelW) || panelW < 2.0f);
+  if (!bhSessionActive && bhSawStableFloat && ((leftFloat && looksLikeDischarge) || floatNoLongerHolding)) {
+    bhStartSession(battV);
+  }
+
+  if (bhSessionActive) {
+    if (battV < bhMinV) bhMinV = battV;
+    unsigned long elapsedMin = (now - bhSessionStartMs) / 60000UL;
+    while (bhNextSampleIndex < BH_SAMPLE_COUNT && elapsedMin >= BH_SAMPLE_MINUTES[bhNextSampleIndex]) {
+      bhSamples[bhNextSampleIndex] = battV;
+      bhNextSampleIndex++;
+      bhEvaluateSession(false);
+      batteryHealthSave();
+    }
+    if (elapsedMin >= BH_SAMPLE_MINUTES[BH_SAMPLE_COUNT - 1]) bhCompleteSession("campioni_4h_completi");
+    if (chargeState == "Bulk" || chargeState == "Absorption" || chargeState == "Assorbimento") bhCompleteSession("nuova_carica");
+  }
+
+  bhPreviousChargeState = chargeState;
+}
+
+String batteryHealthJson() {
+  String j = "{";
+  j += "\"firmware\":\"" + String(FW_VERSION) + "\",";
+  j += "\"active\":" + String(bhSessionActive ? "true" : "false") + ",";
+  j += "\"victron_online\":" + String(victronOnline() ? "true" : "false") + ",";
+  j += "\"charge_state\":\"" + esc(chargeState) + "\",";
+  j += "\"charge_state_label\":\"" + esc(chargeStateItalianLabel(chargeState)) + "\",";
+  j += "\"battery_voltage\":" + String(bhVoltageValid(battV) ? battV : 0, 3) + ",";
+  j += "\"last_float_time\":\"" + esc(bhLastFloatTime) + "\",";
+  j += "\"last_float_voltage\":" + String(isfinite(bhLastFloatV) ? bhLastFloatV : 0, 3) + ",";
+  j += "\"session_start_time\":\"" + esc(bhSessionStartTime) + "\",";
+  j += "\"session_start_voltage\":" + String(isfinite(bhStartV) ? bhStartV : 0, 3) + ",";
+  j += "\"minimum_voltage\":" + String(isfinite(bhMinV) ? bhMinV : 0, 3) + ",";
+  j += "\"drop_1h_from_settled\":" + String(isfinite(bhLastDrop1h) ? bhLastDrop1h : 0, 3) + ",";
+  j += "\"drop_4h_from_settled\":" + String(isfinite(bhLastDrop4h) ? bhLastDrop4h : 0, 3) + ",";
+  j += "\"verdict\":\"" + esc(bhLastVerdict) + "\",";
+  j += "\"reason\":\"" + esc(bhLastReason) + "\",";
+  j += "\"completed_cycles\":" + String(bhCompletedCycles) + ",";
+  Preferences pp; pp.begin("victron", true);
+  String plantAh = pp.getString("plant_batt_ah", "");
+  String plantType = pp.getString("plant_batt_type", "N/D");
+  String plantSysV = pp.getString("plant_sys_v", "12");
+  pp.end();
+  j += "\"load_state\":\"" + esc(loadState) + "\",";
+  j += "\"load_current_a\":" + String(isfinite(loadCurrentA) ? loadCurrentA : 0, 3) + ",";
+  j += "\"configured_battery_ah\":\"" + esc(plantAh) + "\",";
+  j += "\"configured_battery_type\":\"" + esc(plantType) + "\",";
+  j += "\"configured_system_voltage\":\"" + esc(plantSysV) + "\",";
+  j += "\"samples\":" + bhFmtSampleJson();
+  j += "}";
+  return j;
+}
+
+void handleBatteryHealthJson() {
+  if (!requireAuth()) return;
+  sendJsonPretty(batteryHealthJson());
+}
+
+String bhSampleTableHtml() {
+  String h = "<table><tr><th>Dopo Float</th><th>Tensione</th></tr>";
+  for (int i = 0; i < BH_SAMPLE_COUNT; i++) {
+    h += "<tr><td>" + String(BH_SAMPLE_MINUTES[i]) + " min</td><td><b>" + bhFmtV(bhSamples[i]) + "</b></td></tr>";
+  }
+  h += "</table>";
+  return h;
+}
+
+void handleBatteryHealthPage() {
+  if (!requireAuth()) return;
+  String html = htmlHeader("Battery Health");
+  html += "<h1>Battery Health Pro</h1>";
+  html += "<p><a href='/'>Dashboard</a> &middot; <a href='/battery-health.json'>JSON</a> &middot; <a href='/plant-info'>Dati impianto</a> &middot; <a href='/history-gx'>Storico</a></p>";
+  html += "<div class='card'><div class='t'>Stato analisi</div><div class='v'>" + esc(bhLastVerdict) + "</div><div class='e'>" + esc(bhLastReason) + "</div></div>";
+  html += "<div class='grid'>";
+  html += card("Victron", victronOnline()?"Online":"No Data", "Stato carica: " + esc(chargeState) + "<br>V batteria: " + bhFmtV(battV));
+  html += card("Ultimo Float", bhFmtV(bhLastFloatV), "Ora: " + esc(bhLastFloatTime) + "<br>Stabile rilevato: " + String(bhSawStableFloat ? "SI" : "NO"));
+  html += card("Sessione scarica", bhSessionActive?"Attiva":"In attesa", "Avvio: " + esc(bhSessionStartTime) + "<br>V start: " + bhFmtV(bhStartV));
+  html += card("Minima rilevata", bhFmtV(bhMinV), "Drop 1h: " + bhFmtDrop(bhLastDrop1h) + "<br>Drop 4h: " + bhFmtDrop(bhLastDrop4h));
+  html += "</div>";
+  Preferences pp; pp.begin("victron", true);
+  String plantAh = pp.getString("plant_batt_ah", "N/D");
+  String plantType = pp.getString("plant_batt_type", "N/D");
+  String plantSysV = pp.getString("plant_sys_v", "12");
+  pp.end();
+  html += card("Batteria configurata", esc(plantSysV) + " V / " + esc(plantAh) + " Ah", "Tipo: " + esc(plantType) + "<br>Usata come contesto per interpretare la curva, non come misura diretta di capacita'.");
+  html += "<div class='card'><div class='t'>Curva dopo mantenimento</div>" + bhSampleTableHtml() + "</div>";
+  html += "<div class='card'><div class='t'>Come interpretarla</div><p>La caduta iniziale da 13.5V circa verso 12.8V puo' essere normale: e' assestamento dopo carica. Il firmware valuta soprattutto la caduta dopo 15-60 minuti e la minima nelle ore successive.</p><p><b>Buona</b>: scarica lenta. <b>Da controllare</b>: caduta rapida o minima bassa. <b>Critica</b>: crollo forte senza carico importante.</p><p>Se ci sono carichi collegati, la diagnosi va letta come indicazione e non come test capacita' professionale.</p></div>";
+  html += "<div class='card'><div class='t'>Log</div><p>Cicli completati: <b>" + String(bhCompletedCycles) + "</b></p><p>CSV interno: <b>/battery_health.csv</b></p></div>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
 void setup() {
   lastUserActivityMs = millis();
   // V10.4.73: VE.Direct e' su IO27, quindi IO35 resta libero e non disturba GPIO34 batteria ESP.
@@ -8365,6 +9793,8 @@ void setup() {
   safeBootStart();
   drawBootProgress("Avvio filesystem", 25);
   initLittleFs();
+  loadWebAuthSettings();
+  batteryHealthLoad();
   ensurePublicOtaRepoDefaults();
   setupBackupRetention5x5Defaults();
   prefs.begin("victron", true); sdWriteProtectEnabled = prefs.getBool("sd_wr_prot", false); prefs.end();
@@ -8380,6 +9810,7 @@ void setup() {
     for (int i=0;i<31;i++) resetChargeSlot(chDaily[i]);
     for (int i=0;i<12;i++) resetChargeSlot(chMonthly[i]);
   }
+  sanitizeAllChargeHistorySlots();
   saveCurrentFirmwareInfo();
   drawBootProgress("Filesystem OK", 35);
 
@@ -8389,7 +9820,7 @@ void setup() {
   // In alcune CYD la init del touch durante la schermata boot sporca il bus e fa
   // sembrare il progresso tornato a zero. Lo inizializziamo alla fine, a TFT stabile.
   drawBootProgress("Seriale Victron", 45);
-  VictronSerial.begin(VICTRON_BAUD, SERIAL_8N1, VICTRON_RX, VICTRON_TX);
+  VictronSerial.begin(VICTRON_BAUD, SERIAL_8N1, pubCfg.veDirectRxPin, VICTRON_TX);
   lastVictronReinitMs = millis();
   lastVictronReinitReason = "boot";
 
@@ -8400,8 +9831,25 @@ void setup() {
   // Se cambi rete e non funziona, commentala e ricompila.
   // WiFi.config(local_IP, gateway, subnet, dns1);  // disattivato per rendere stabile WiFiManager
 
+  prefs.begin("victron", false);
+  forceWifiPortalAtBoot = prefs.getBool("force_wifi_portal", false);
+  if (forceWifiPortalAtBoot) prefs.putBool("force_wifi_portal", false);
+  prefs.end();
+
   drawBootProgress("Connessione WiFi", 55);
-  startWiFiManager(forceWifiPortalAtBoot);
+  if (recoveryMode) {
+    // In Recovery non bloccare per 180s nel portale WiFiManager: prova la rete normale,
+    // poi apre comunque l'AP di emergenza indipendente dal router.
+    connectConfiguredWiFi(15000UL);
+  } else {
+    startWiFiManager(forceWifiPortalAtBoot);
+  }
+
+  if (recoveryMode) {
+    startRecoveryAp("Recovery Mode attivo al boot");
+  } else if (WiFi.status() != WL_CONNECTED) {
+    startRecoveryAp("WiFi normale non connesso: fallback recovery");
+  }
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("IP: ");
@@ -8435,7 +9883,16 @@ void setup() {
   server.on("/history-compact", HTTP_GET, handleHistoryCompact);
   server.on("/history-page", HTTP_GET, handleHistoryPage);
   server.on("/settings", HTTP_GET, handleSettings);
+  server.on("/webui-auth", HTTP_GET, handleWebAuthPage);
+  server.on("/webui-auth-save", HTTP_POST, handleWebAuthSave);
+  server.on("/webui-auth-reset", HTTP_GET, handleWebAuthReset);
+  server.on("/webui-auth.json", HTTP_GET, handleWebAuthJson);
   server.on("/network", HTTP_GET, handleNetworkPage);
+  server.on("/wifi", HTTP_GET, handleWifiManagerProPage);
+  server.on("/wifi-save", HTTP_POST, handleWifiManagerProSave);
+  server.on("/wifi.json", HTTP_GET, handleWifiManagerProJson);
+  server.on("/wifi-clear", HTTP_GET, handleWifiManagerProClear);
+  server.on("/wifi-portal", HTTP_GET, handleWifiPortalStart);
   server.on("/quick-check", HTTP_GET, handleQuickCheckPage);
   server.on("/network.json", HTTP_GET, handleNetworkJson);
   server.on("/updates", HTTP_GET, handleUpdatesHub);
@@ -8464,6 +9921,8 @@ void setup() {
   server.on("/battery", HTTP_GET, handleBatteryPage);
   server.on("/battery-installed", HTTP_GET, handleBatteryInstalledToggle);
   server.on("/battery.json", HTTP_GET, handleBatteryJson);
+  server.on("/battery-health", HTTP_GET, handleBatteryHealthPage);
+  server.on("/battery-health.json", HTTP_GET, handleBatteryHealthJson);
   server.on("/sd", HTTP_GET, handleSdPage);
   server.on("/sd.json", HTTP_GET, handleSdJson);
   server.on("/sd-mount", HTTP_GET, handleSdMount);
@@ -8508,6 +9967,9 @@ void setup() {
   server.on("/theme", HTTP_GET, handleThemePage);
   server.on("/theme-save", HTTP_POST, handleThemeSave);
   server.on("/power", HTTP_GET, handlePowerPage);
+  server.on("/night-power-saver", HTTP_GET, handleNightPowerSaverPage);
+  server.on("/night-power-saver-save", HTTP_POST, handleNightPowerSaverSave);
+  server.on("/night-power-saver.json", HTTP_GET, handleNightPowerSaverJson);
   server.on("/shutdown", HTTP_GET, handleShutdownPage);
   server.on("/shutdown-timed", HTTP_GET, handleShutdownTimed);
   server.on("/shutdown-reset", HTTP_GET, handleShutdownReset);
@@ -8520,6 +9982,9 @@ void setup() {
   server.on("/ntp-sync", HTTP_GET, handleNtpSyncNow);
   server.on("/vedirect-raw", HTTP_GET, handleVedirectRawPage);
   server.on("/vedirect-raw.json", HTTP_GET, handleVedirectRawJson);
+  server.on("/vedirect-decode.json", HTTP_GET, handleLoadMonitorJson);
+  server.on("/load-monitor", HTTP_GET, handleLoadMonitorPage);
+  server.on("/load-monitor.json", HTTP_GET, handleLoadMonitorJson);
   server.on("/vedirect-restart", HTTP_GET, handleVedirectRestart);
   server.on("/api/v1", HTTP_GET, handleApiV1Index);
   server.on("/api/v1/status", HTTP_GET, handleApiV1Status);
@@ -8551,6 +10016,8 @@ void setup() {
   server.on("/ota-notify-clear", HTTP_GET, handleOtaNotifyClear);
   server.on("/github-progress-page", HTTP_GET, handleGithubProgressPage);
   server.on("/recovery", HTTP_GET, handleRecoveryPage);
+  server.on("/recovery-ap-start", HTTP_GET, handleRecoveryApStart);
+  server.on("/recovery-ap.json", HTTP_GET, handleRecoveryApJson);
   server.on("/reboot-recovery", HTTP_GET, handleRebootRecovery);
   server.on("/github-save", HTTP_POST, handleGithubSave);
   server.on("/backlight", HTTP_GET, handleBacklight);
@@ -8669,6 +10136,8 @@ void loop() {
   readVictron();
   victronAutoRecoveryLoop();
   updateHistory();
+  batteryHealthLoop();
+  nightPowerSaverLoop();
   sdLoggerLoop();
   dailyConfigBackupLoop();
   alertHistoryLoop();
