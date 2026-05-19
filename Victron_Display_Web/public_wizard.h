@@ -54,6 +54,8 @@ String wizardCheckbox(
   const String &help = ""
 );
 
+String wizardProtocolSelect();
+
 String wizardSelectBool(
   const String &name,
   const String &label,
