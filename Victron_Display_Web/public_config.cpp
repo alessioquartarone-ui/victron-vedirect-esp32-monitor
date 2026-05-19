@@ -3,10 +3,6 @@
 VictronPublicConfig pubCfg;
 static Preferences vicPrefs;
 
-// ======================================================
-// Internal Preferences helpers
-// ======================================================
-
 static String prefGetString(const char *key, const String &fallback) {
   return vicPrefs.getString(key, fallback);
 }
@@ -41,7 +37,6 @@ bool publicProtocolIsSupported(const String &protocolId) {
   if (protocolId == VIC_PROTOCOL_JK_BMS) return VIC_SUPPORTS_JK_BMS;
   if (protocolId == VIC_PROTOCOL_GENERIC_MODBUS_RTU) return VIC_SUPPORTS_GENERIC_MODBUS_RTU;
   if (protocolId == VIC_PROTOCOL_GENERIC_UART_TEXT) return VIC_SUPPORTS_GENERIC_UART_TEXT;
-
   return false;
 }
 
@@ -55,7 +50,6 @@ String publicProtocolLabelFor(const String &protocolId) {
   if (protocolId == VIC_PROTOCOL_JK_BMS) return "JK BMS";
   if (protocolId == VIC_PROTOCOL_GENERIC_MODBUS_RTU) return "Generic Modbus RTU";
   if (protocolId == VIC_PROTOCOL_GENERIC_UART_TEXT) return "Generic UART text";
-
   return "Unknown protocol";
 }
 
@@ -176,9 +170,6 @@ void loadPublicConfig() {
   pubCfg.hardwareDescription = prefGetString("hwDesc", pubCfg.hardwareDescription);
 
   pubCfg.deviceProtocol = prefGetString("devProto", pubCfg.deviceProtocol);
-  pubCfg.deviceProtocolLabel = prefGetString("devProtoLbl", pubCfg.deviceProtocolLabel);
-  pubCfg.deviceProtocolStatus = prefGetString("devProtoSt", pubCfg.deviceProtocolStatus);
-  pubCfg.deviceProtocolNote = prefGetString("devProtoNt", pubCfg.deviceProtocolNote);
 
   pubCfg.veDirectRxPin = prefGetInt("vedRx", pubCfg.veDirectRxPin);
   pubCfg.espBatteryAdcPin = prefGetInt("espAdc", pubCfg.espBatteryAdcPin);
@@ -236,12 +227,10 @@ void loadPublicConfig() {
 
   vicPrefs.end();
 
-  // Refresh derived protocol fields from selected protocol ID.
   pubCfg.deviceProtocolLabel = publicProtocolLabelFor(pubCfg.deviceProtocol);
   pubCfg.deviceProtocolStatus = publicProtocolStatusFor(pubCfg.deviceProtocol);
   pubCfg.deviceProtocolNote = publicProtocolNoteFor(pubCfg.deviceProtocol);
 
-  // Safety clamps after loading.
   pubCfg.veDirectRxPin = publicClampInt(pubCfg.veDirectRxPin, -1, 48);
   pubCfg.espBatteryAdcPin = publicClampInt(pubCfg.espBatteryAdcPin, -1, 48);
   pubCfg.espBatteryMultiplier = publicClampFloat(pubCfg.espBatteryMultiplier, 0.10f, 10.00f);
@@ -258,7 +247,6 @@ void loadPublicConfig() {
 
   pubCfg.dashRefreshMs = publicSafeUIntArg(String(pubCfg.dashRefreshMs), 3000, 1000, 60000);
   pubCfg.historyRefreshMs = publicSafeUIntArg(String(pubCfg.historyRefreshMs), 10000, 3000, 300000);
-
   pubCfg.shutdownTimerSec = publicSafeUIntArg(String(pubCfg.shutdownTimerSec), 180, 5, 3600);
 }
 
@@ -349,7 +337,6 @@ void resetPublicConfig() {
   vicPrefs.begin("vicpub", false);
   vicPrefs.clear();
   vicPrefs.end();
-
   applyPublicDefaults();
 }
 
@@ -405,22 +392,18 @@ float publicClampFloat(float value, float minValue, float maxValue) {
 String publicSafeStringArg(const String &value, const String &fallback) {
   String v = value;
   v.trim();
-
   if (v.length() == 0) return fallback;
   if (v.length() > 256) v = v.substring(0, 256);
-
   return v;
 }
 
 int publicSafeIntArg(const String &value, int fallback, int minValue, int maxValue) {
   String v = value;
   v.trim();
-
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   long parsed = strtol(v.c_str(), &endPtr, 10);
-
   if (endPtr == v.c_str()) return fallback;
 
   return publicClampInt((int)parsed, minValue, maxValue);
@@ -429,12 +412,10 @@ int publicSafeIntArg(const String &value, int fallback, int minValue, int maxVal
 uint32_t publicSafeUIntArg(const String &value, uint32_t fallback, uint32_t minValue, uint32_t maxValue) {
   String v = value;
   v.trim();
-
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   unsigned long parsed = strtoul(v.c_str(), &endPtr, 10);
-
   if (endPtr == v.c_str()) return fallback;
 
   if (parsed < minValue) return minValue;
@@ -446,12 +427,10 @@ uint32_t publicSafeUIntArg(const String &value, uint32_t fallback, uint32_t minV
 float publicSafeFloatArg(const String &value, float fallback, float minValue, float maxValue) {
   String v = value;
   v.trim();
-
   if (v.length() == 0) return fallback;
 
   char *endPtr = nullptr;
   float parsed = strtof(v.c_str(), &endPtr);
-
   if (endPtr == v.c_str()) return fallback;
   if (isnan(parsed) || isinf(parsed)) return fallback;
 
@@ -463,17 +442,8 @@ bool publicSafeBoolArg(const String &value, bool fallback) {
   v.trim();
   v.toLowerCase();
 
-  if (v == "1") return true;
-  if (v == "true") return true;
-  if (v == "on") return true;
-  if (v == "yes") return true;
-  if (v == "enabled") return true;
-
-  if (v == "0") return false;
-  if (v == "false") return false;
-  if (v == "off") return false;
-  if (v == "no") return false;
-  if (v == "disabled") return false;
+  if (v == "1" || v == "true" || v == "on" || v == "yes" || v == "enabled") return true;
+  if (v == "0" || v == "false" || v == "off" || v == "no" || v == "disabled") return false;
 
   return fallback;
 }
@@ -490,7 +460,6 @@ String publicConfigToJson(bool pretty) {
   json.reserve(5200);
 
   json += "{" + nl;
-
   json += sp + "\"firmwareName\":\"" + publicHtmlEscape(pubCfg.firmwareName) + "\"," + nl;
   json += sp + "\"firmwareVersion\":\"" + publicHtmlEscape(pubCfg.firmwareVersion) + "\"," + nl;
   json += sp + "\"hardwareProfile\":\"" + publicHtmlEscape(pubCfg.hardwareProfile) + "\"," + nl;
@@ -534,7 +503,6 @@ String publicConfigToJson(bool pretty) {
 
   json += sp + "\"shutdownEnabled\":" + String(pubCfg.shutdownEnabled ? "true" : "false") + "," + nl;
   json += sp + "\"shutdownTimerSec\":" + String(pubCfg.shutdownTimerSec) + nl;
-
   json += "}" + nl;
 
   return json;
