@@ -28,6 +28,7 @@
   - V10.4.82: grafico live pannello scalato da dati impianto, legenda/valori live, popup storico piu ordinati, quick-check
   - V10.4.83: fix layout popup storico, grafici GX con scale chiare, no-data pulito e padding iPhone
   - V10.5.2: public-ready wizard based on V10.4.93 charge-state history fix, no private hardcoded WiFi, configurable OTA, runtime VE.Direct pin default IO27
+  - V10.5.4: Remote WebUI Tunnel client over outbound HTTP polling, keeps original ESP32 WebUI available remotely through your own server
 */
 
 #include <Arduino.h>
@@ -62,11 +63,12 @@
 #include "public_config.h"
 #include "public_wizard.h"
 #include "protocol_epever.h"
+#include "remote_tunnel.h"
 
 const char* WIFI_SSID = "";  // Public build: no hardcoded WiFi SSID
 const char* WIFI_PASS = "";  // Public build: no hardcoded WiFi password
 const char* HOSTNAME  = "victron-esp32-monitor";
-const char* FW_VERSION = "V10.5.3-PUBLIC-MULTIPROTOCOL-EPEVER";
+const char* FW_VERSION = "V10.5.4-PUBLIC-REMOTE-WEBUI-TUNNEL";
 const char* FW_BUILD_DATE = __DATE__;
 const char* FW_BUILD_TIME = __TIME__;
 
@@ -10091,8 +10093,11 @@ void setup() {
   registerPublicWizardRoutes(server);
   server.on("/epever-json", HTTP_GET, []() { server.send(200, "application/json", epeverJson(true)); });
   server.on("/epever-status", HTTP_GET, []() { server.send(200, "text/plain", epeverStatusText()); });
+  server.on("/tunnel-status", HTTP_GET, []() { server.send(200, "application/json", remoteTunnelStatusJson(true)); });
+  server.on("/tunnel-status.txt", HTTP_GET, []() { server.send(200, "text/plain", remoteTunnelStatusText()); });
   server.onNotFound(handleNotFound);
   server.begin();
+  remoteTunnelStartFromConfig();
   addEventLog("WEB", "Server web avviato");
   drawBootProgress("Server web avviato", 85);
   rollbackInitAndValidate();
@@ -10185,6 +10190,7 @@ void initTouchDeferred() {
 void loop() {
   ArduinoOTA.handle();
   server.handleClient();
+  remoteTunnelLoop();
   if (otaRestartPending && (long)(millis() - otaRestartAtMs) >= 0) {
     cleanRestartNow("ota_pending_restart");
   }
