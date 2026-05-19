@@ -39,6 +39,13 @@ String wizardInputText(
   const String &help = ""
 );
 
+String wizardInputPassword(
+  const String &name,
+  const String &label,
+  const String &value,
+  const String &help = ""
+);
+
 String wizardInputNumber(
   const String &name,
   const String &label,
